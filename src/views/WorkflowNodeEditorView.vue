@@ -40,8 +40,12 @@ const loaded = ref(false)
 const editingName = ref(false)
 const nameBeforeEdit = ref('')
 const nameInputRef = ref<InputInst | null>(null)
+const editorRef = ref<{ snapshotDefinition: () => Record<string, unknown> } | null>(null)
 const loadedUpdatedAt = ref<number | undefined>()
 const editorKey = ref(0)
+const saving = ref(false)
+const initialSnapshot = ref('')
+const showClosePrompt = ref(false)
 const showRevisionConflict = ref(false)
 const pendingDefinition = ref<Record<string, unknown> | null>(null)
 const formatError = ref('')
@@ -105,7 +109,30 @@ const missingModelNodes = computed(() => {
   }
   return missing
 })
-const canSave = computed(() => !formError.value)
+const canSave = computed(() => !formError.value && !saving.value)
+
+function snapshot() {
+  return JSON.stringify({
+    name: name.value,
+    description: description.value,
+    defaultDevice: defaultDevice.value,
+    defaultFormat: defaultFormat.value,
+    definition: definition.value,
+  })
+}
+
+const dirty = computed(() => loaded.value
+  && Boolean(initialSnapshot.value)
+  && snapshot() !== initialSnapshot.value)
+
+function captureInitialSnapshot() {
+  initialSnapshot.value = snapshot()
+}
+
+function syncCurrentDefinition() {
+  const current = editorRef.value?.snapshotDefinition()
+  if (current) definition.value = current
+}
 
 function createFreshDefinition(): Record<string, unknown> {
   // An empty comfy-mss graph; the editor seeds a starter workflow on mount.
@@ -157,6 +184,8 @@ async function persistDefinition(
   definitionToSave: Record<string, unknown>,
   options: { force?: boolean; saveCopy?: boolean } = {},
 ) {
+  if (saving.value) return false
+  saving.value = true
   try {
     const entry = await workflow.saveWorkflow({
       id: options.saveCopy ? undefined : (editingId.value || undefined),
@@ -169,29 +198,33 @@ async function persistDefinition(
     pendingDefinition.value = null
     showRevisionConflict.value = false
     loadWorkflow(entry)
+    captureInitialSnapshot()
     message.success(t('workflows.saved'))
+    return true
   } catch (error) {
     if (error instanceof WorkflowRevisionConflictError) {
       pendingDefinition.value = definitionToSave
       showRevisionConflict.value = true
-      return
+      return false
     }
     console.error('[workflow-node-editor-view] save failed', error)
     message.error(error instanceof Error ? error.message : t('workflows.saveFailed'))
+    return false
+  } finally {
+    saving.value = false
   }
 }
 
 async function save(currentDefinition?: Record<string, unknown>) {
-  if (!canSave.value) return
-  const base = currentDefinition && typeof currentDefinition === 'object'
-    ? currentDefinition
-    : definition.value
-  const definitionToSave = storeGraphDefaults(base, {
+  if (currentDefinition && typeof currentDefinition === 'object') definition.value = currentDefinition
+  else syncCurrentDefinition()
+  if (!canSave.value) return false
+  const definitionToSave = storeGraphDefaults(definition.value, {
     device: defaultDevice.value,
     outputFormat: defaultFormat.value,
   })
   definition.value = definitionToSave
-  await persistDefinition(definitionToSave)
+  return persistDefinition(definitionToSave)
 }
 
 async function reloadRevisionConflict() {
@@ -218,6 +251,15 @@ function overwriteRevisionConflict() {
 }
 
 async function closeEditor() {
+  syncCurrentDefinition()
+  if (dirty.value) {
+    showClosePrompt.value = true
+    return
+  }
+  await destroyWindow()
+}
+
+async function destroyWindow() {
   if (currentWindow && currentWindow.label !== 'main') {
     try {
       await invoke('close_current_window')
@@ -227,6 +269,18 @@ async function closeEditor() {
     return
   }
   await router.push('/workflows')
+}
+
+async function saveAndClose() {
+  if (saving.value) return
+  syncCurrentDefinition()
+  if (formError.value) {
+    message.warning(formError.value)
+    return
+  }
+  showClosePrompt.value = false
+  const saved = await save()
+  if (saved) await destroyWindow()
 }
 
 function beginNameEdit() {
@@ -307,6 +361,7 @@ onMounted(async () => {
   const isNewWorkflow = route.query.new === '1'
   const target = workflowId ? workflows.value.find(item => item.id === workflowId) : null
   loadWorkflow(isNewWorkflow ? null : target || workflows.value.find(item => item.id === workflow.selectedWorkflowId) || workflows.value[0] || null)
+  captureInitialSnapshot()
   loaded.value = true
   await refreshMaximized()
   if (!currentWindow || currentWindow.label === 'main') return
@@ -394,6 +449,7 @@ onBeforeUnmount(() => {
 
     <WorkflowNodeEditor
       v-else-if="loaded"
+      ref="editorRef"
       :key="editorKey"
       v-model:definition="definition"
       :model-options="modelOptions"
@@ -405,8 +461,19 @@ onBeforeUnmount(() => {
       :advisory="missingModelNodes.length ? t('workflows.stepModelNotDownloaded', { id: missingModelNodes.join(', ') }) : ''"
       @save="save"
       @close="closeEditor"
+      @initialized="captureInitialSnapshot"
       @defaults-restored="restoreDefaultControls"
     />
+
+    <n-modal v-model:show="showClosePrompt" preset="card" :title="t('workflows.simpleUnsavedTitle')" style="width: min(440px, calc(100vw - 32px))">
+      <p>{{ t('workflows.simpleUnsavedHint') }}</p>
+      <template #footer>
+        <div class="workflow-node-editor-page__prompt-actions">
+          <n-button secondary @click="showClosePrompt = false; void destroyWindow()">{{ t('workflows.simpleDiscardChanges') }}</n-button>
+          <n-button type="primary" :loading="saving" :disabled="saving" @click="void saveAndClose()">{{ t('workflows.simpleSaveAndClose') }}</n-button>
+        </div>
+      </template>
+    </n-modal>
 
     <WorkflowRevisionConflictModal
       v-model:show="showRevisionConflict"
@@ -436,6 +503,12 @@ onBeforeUnmount(() => {
   gap: 14px;
   width: min(640px, 100%);
   margin: 48px auto 0;
+}
+
+.workflow-node-editor-page__prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .workflow-node-editor-page--custom-chrome {

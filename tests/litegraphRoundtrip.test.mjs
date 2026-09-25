@@ -15,7 +15,7 @@ const vite = await createServer({
 })
 after(() => vite.close())
 
-const { LGraph, LiteGraph } = await vite.ssrLoadModule('@comfyorg/litegraph')
+const { LGraph, LGraphCanvas, LiteGraph } = await vite.ssrLoadModule('@comfyorg/litegraph')
 const {
   registerPymssNodes,
   allNodeTypes,
@@ -24,6 +24,9 @@ const {
   localizePymssNode,
   setSeparateStems,
   setPymssNodeTranslator,
+  applyPymssPortColors,
+  PORT_COLORS,
+  SEPARATE_NODE_MIN_WIDTH,
 } = await vite.ssrLoadModule('/src/litegraph/registerNodes.ts')
 const adapter = await vite.ssrLoadModule('/src/litegraph/graphAdapter.ts')
 registerPymssNodes()
@@ -120,6 +123,7 @@ test('save audio sample-rate choices stop at 48 kHz', () => {
 
 test('separate nodes shrink after switching from six stems to two', () => {
   const node = LiteGraph.createNode('mss_separate')
+  assert.ok(node.size[0] >= SEPARATE_NODE_MIN_WIDTH)
   setSeparateStems(node, ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'])
   const expandedHeight = node.size[1]
 
@@ -128,6 +132,37 @@ test('separate nodes shrink after switching from six stems to two', () => {
   assert.ok(node.size[1] < expandedHeight)
   assert.equal(node.size[1], node.computeSize()[1])
   assert.equal(node.outputs.length, 4)
+})
+
+test('separate nodes restore at a readable minimum width without shrinking wider layouts', () => {
+  const graph = new LGraph()
+  const node = LiteGraph.createNode('mss_separate')
+  graph.add(node)
+  const source = exportGraph(graph)
+  source.nodes[0].size = [180, source.nodes[0].size[1]]
+
+  const restored = load(source).nodes[0]
+  assert.equal(restored.size[0], SEPARATE_NODE_MIN_WIDTH)
+
+  restored.setSize([360, restored.size[1]])
+  setSeparateStems(restored, ['vocals', 'instrumental'])
+  assert.equal(restored.size[0], 360)
+})
+
+test('workflow port types use distinct colors for links and connection states', () => {
+  const canvas = {
+    default_connection_color_byType: {},
+    default_connection_color_byTypeOff: {},
+  }
+  applyPymssPortColors(canvas)
+
+  const types = ['AUDIO', 'STRING', 'PYMSS_MSS_PARAMS', 'PYMSS_VR_PARAMS', 'BOOLEAN', 'COMBO']
+  assert.equal(new Set(types.map(type => PORT_COLORS[type])).size, types.length)
+  for (const type of types) {
+    assert.equal(LGraphCanvas.link_type_colors[type], PORT_COLORS[type])
+    assert.equal(canvas.default_connection_color_byType[type], PORT_COLORS[type])
+    assert.ok(canvas.default_connection_color_byTypeOff[type])
+  }
 })
 
 test('legacy Studio builtin widget layouts migrate without shifting values', () => {

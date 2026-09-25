@@ -27,6 +27,33 @@ const ORIGINAL_LABEL = '__pymssOriginalLabel'
 const LAST_LOCALIZED_LABEL = '__pymssLastLocalizedLabel'
 const LOCALIZE_LABEL_FLAG = '__pymssLocalizeLabel'
 
+export const SEPARATE_NODE_MIN_WIDTH = 300
+
+export const PORT_COLORS: Record<string, string> = {
+  [PORT.AUDIO]: '#66d19e',
+  [PORT.STRING]: '#f2c94c',
+  [PORT.MSS_PARAMS]: '#e879f9',
+  [PORT.VR_PARAMS]: '#a78bfa',
+  [PORT.BOOLEAN]: '#60a5fa',
+  [PORT.COMBO]: '#94a3b8',
+}
+
+const PORT_COLORS_OFF: Record<string, string> = {
+  [PORT.AUDIO]: '#39755c',
+  [PORT.STRING]: '#806d32',
+  [PORT.MSS_PARAMS]: '#74427c',
+  [PORT.VR_PARAMS]: '#594a83',
+  [PORT.BOOLEAN]: '#3c6091',
+  [PORT.COMBO]: '#526174',
+}
+
+export function applyPymssPortColors(canvas?: LGraphCanvas) {
+  Object.assign(LGraphCanvas.link_type_colors, PORT_COLORS)
+  if (!canvas) return
+  Object.assign(canvas.default_connection_color_byType, PORT_COLORS)
+  Object.assign(canvas.default_connection_color_byTypeOff, PORT_COLORS_OFF)
+}
+
 function localizeContextMenu(menu: any) {
   const root = menu?.root as HTMLElement | undefined
   if (!root) return
@@ -247,7 +274,7 @@ export function setSeparateStems(node: LGraphNodeType, stems: string[]) {
     }
   }
   n.stems = list
-  n.setSize([n.size[0], n.computeSize()[1]])
+  n.setSize([Math.max(n.size[0], SEPARATE_NODE_MIN_WIDTH), n.computeSize()[1]])
   localizePymssNode(n)
 }
 
@@ -409,6 +436,9 @@ function makeNodeClass(spec: NodeSpec): any {
       if (spec.isOutput) (this as any).is_output_node = true
       if (spec.type === 'pymss_audio_ensemble') syncEnsembleInputs(this, this.widgets?.[0]?.value)
       localizeNodeWithSpec(this, spec)
+      if (spec.dynamicStems) {
+        this.setSize([Math.max(this.size[0], SEPARATE_NODE_MIN_WIDTH), this.size[1]])
+      }
     }
 
     configure(info: any) {
@@ -436,7 +466,10 @@ function makeNodeClass(spec: NodeSpec): any {
         syncEnsembleInputs(this, this.widgets?.[0]?.value)
       }
       localizePymssNode(this)
-      this.setSize([this.size[0], Math.max(this.size[1], this.computeSize()[1])])
+      this.setSize([
+        spec.dynamicStems ? Math.max(this.size[0], SEPARATE_NODE_MIN_WIDTH) : this.size[0],
+        Math.max(this.size[1], this.computeSize()[1]),
+      ])
     }
 
     onSerialize(data: any) {
@@ -469,6 +502,7 @@ export function allNodeTypes(): string[] {
 
 export function registerPymssNodes(translator?: NodeTranslator) {
   if (translator) setPymssNodeTranslator(translator)
+  applyPymssPortColors()
   if (registered) return
   registered = true
   const register = (spec: NodeSpec, type = spec.type) => {

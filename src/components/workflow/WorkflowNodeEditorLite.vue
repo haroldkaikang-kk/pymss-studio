@@ -17,6 +17,7 @@ import {
   refreshNodeModelOptions,
   localizePymssNode,
   setPymssNodeTranslator,
+  applyPymssPortColors,
   NODE_SPECS,
   BUILTIN_SPECS,
 } from '@/litegraph/registerNodes'
@@ -56,8 +57,10 @@ const definition = defineModel<Record<string, unknown>>('definition', { required
 const emit = defineEmits<{
   save: [definition: Record<string, unknown>]
   close: []
+  initialized: []
   'defaults-restored': [defaults: GraphDefaults]
 }>()
+defineExpose({ snapshotDefinition })
 
 const { t, locale } = useI18n()
 const nodeTranslator = t as unknown as NodeTranslator
@@ -324,6 +327,7 @@ function initializeGraph() {
   definition.value = snapshotDefinition()
   // The loaded/seeded graph is the baseline for the first undoable edit.
   resetHistory()
+  emit('initialized')
 }
 
 // A standalone window can receive its persisted definition one tick after the
@@ -342,6 +346,7 @@ watch(definition, () => {
     loadDefinition(definition.value)
     awaitingInitialDefinition = false
     resetHistory()
+    emit('initialized')
     ;(canvasRef.value as any)?.setDirty(true, true)
   } catch (error) {
     console.error('[workflow-node-editor] failed to hydrate late graph definition', error)
@@ -359,6 +364,7 @@ onMounted(() => {
   if (!canvasEl.value) return
   const graph = new LGraph()
   const canvas = new LGraphCanvas(canvasEl.value, graph)
+  applyPymssPortColors(canvas)
   graphRef.value = graph
   canvasRef.value = canvas
   // Hide the default search-on-double-click; we use our own palette.
