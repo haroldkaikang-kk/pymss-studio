@@ -535,6 +535,10 @@ export const useTaskStore = defineStore('task', () => {
   const initialized = ref(false)
   const tasks = ref<SeparationTask[]>([])
   const activeTaskId = ref<string | null>(null)
+  // Session-only queue visibility. Persisted task/result history remains the
+  // source for Results and recovery, while this set intentionally starts empty
+  // on every application launch.
+  const sessionTaskIds = ref<Set<string>>(new Set())
   const focusedResultTaskId = ref<string | null>(null)
   const focusedTaskId = ref<string | null>(null)
   const inputFiles = ref<string[]>([])
@@ -585,6 +589,7 @@ export const useTaskStore = defineStore('task', () => {
   const failedTasks = computed(() => tasks.value.filter((task) => task.status === 'failed'))
   const allJobs = computed(() => buildJobs(tasks.value))
   const resultJobs = computed(() => buildJobs(resultTasks.value))
+  const sessionJobs = computed(() => buildJobs(tasks.value.filter(task => sessionTaskIds.value.has(task.id))))
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null
   let progressPersistTimer: ReturnType<typeof setTimeout> | null = null
@@ -686,6 +691,36 @@ export const useTaskStore = defineStore('task', () => {
   function getJobById(id: string | null | undefined) {
     if (!id) return null
     return allJobs.value.find((job) => job.id === id) || null
+  }
+
+  function rememberSessionTasks(items: readonly Pick<SeparationTask, 'id'>[]) {
+    if (!items.length) return
+    const next = new Set(sessionTaskIds.value)
+    items.forEach(item => next.add(item.id))
+    sessionTaskIds.value = next
+  }
+
+  function removeSessionJob(jobId: string) {
+    const next = new Set(sessionTaskIds.value)
+    let removed = 0
+    tasks.value.forEach((task) => {
+      if (taskJobId(task) === jobId && next.delete(task.id)) removed += 1
+    })
+    if (removed) sessionTaskIds.value = next
+    return removed
+  }
+
+  function clearFinishedSessionJobs() {
+    const finishedJobIds = new Set(sessionJobs.value
+      .filter(job => isTerminalTaskStatus(job.status))
+      .map(job => job.id))
+    if (!finishedJobIds.size) return 0
+    const next = new Set(sessionTaskIds.value)
+    tasks.value.forEach((task) => {
+      if (finishedJobIds.has(taskJobId(task))) next.delete(task.id)
+    })
+    sessionTaskIds.value = next
+    return finishedJobIds.size
   }
 
   async function persistTasks() {
@@ -1015,6 +1050,7 @@ export const useTaskStore = defineStore('task', () => {
       runConfig: buildRunConfig(inferenceParams, modelType, outputLayout, outputNaming),
     }
     tasks.value.unshift(task)
+    rememberSessionTasks([task])
     activeTaskId.value = id
     queuePersist()
     return task
@@ -1045,6 +1081,7 @@ export const useTaskStore = defineStore('task', () => {
       runConfig: buildWorkflowRunConfig(workflow, outputLayout, outputNaming),
     }
     tasks.value.unshift(task)
+    rememberSessionTasks([task])
     activeTaskId.value = id
     queuePersist()
     return task
@@ -1053,6 +1090,7 @@ export const useTaskStore = defineStore('task', () => {
   async function startQueuedTask(taskId: string) {
     const task = tasks.value.find((item) => item.id === taskId)
     if (!task || task.status !== 'queued') return false
+    rememberSessionTasks([task])
     const settings = useSettingsStore()
     const config = task.runConfig || buildRunConfig({})
     setTaskStatus(task.id, 'preparing', 'Preparing task')
@@ -1123,6 +1161,7 @@ export const useTaskStore = defineStore('task', () => {
 
   async function startBatchWorker(batchTasks: SeparationTask[]) {
     if (!batchTasks.length) return false
+    rememberSessionTasks(batchTasks)
     const settings = useSettingsStore()
     const primary = batchTasks[0]
     const config = primary.runConfig || buildRunConfig({})
@@ -1179,6 +1218,7 @@ export const useTaskStore = defineStore('task', () => {
 
   async function startWorkflowBatchWorker(batchTasks: SeparationTask[]) {
     if (!batchTasks.length) return false
+    rememberSessionTasks(batchTasks)
     const settings = useSettingsStore()
     const primary = batchTasks[0]
     const config = primary.runConfig || buildRunConfig({})
@@ -1503,6 +1543,9 @@ export const useTaskStore = defineStore('task', () => {
   // 当一个任务在任务页与结果页都不再可见时，从底层数组彻底回收，避免无限堆积。
   function reclaimHiddenTasks() {
     tasks.value = tasks.value.filter((task) => !task.taskHidden || hasResultPresence(task))
+    const retainedIds = new Set(tasks.value.map(task => task.id))
+    const nextSessionIds = new Set([...sessionTaskIds.value].filter(id => retainedIds.has(id)))
+    if (nextSessionIds.size !== sessionTaskIds.value.size) sessionTaskIds.value = nextSessionIds
   }
 
   function removeTask(id: string) {
@@ -1904,6 +1947,7 @@ export const useTaskStore = defineStore('task', () => {
     resultTasks,
     allJobs,
     resultJobs,
+    sessionJobs,
     queuedTasks,
     failedTasks,
     focusedResultTaskId,
@@ -1960,6 +2004,8 @@ export const useTaskStore = defineStore('task', () => {
     focusTask,
     removeTask,
     removeTasks,
+    removeSessionJob,
+    clearFinishedSessionJobs,
     removeResult,
     removeResults,
     clearResults,

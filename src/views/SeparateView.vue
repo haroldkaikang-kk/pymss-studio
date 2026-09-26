@@ -28,7 +28,7 @@ import {
   GridOutline,
   ListOutline,
 } from '@vicons/ionicons5'
-import { useTaskStore, type ModelListSortMode, type OutputLayout, type SeparationTask, type StemOutput } from '@/stores/task'
+import { useTaskStore, type ModelListSortMode, type OutputLayout, type SeparationJob, type SeparationTask, type StemOutput } from '@/stores/task'
 import { resolveJobStatus } from '@/features/tasks/lifecycle'
 import { useWorkflowStore, type WorkflowEntry } from '@/stores/workflow'
 import { WORKFLOW_FORMAT_VERSION } from '@/workflows/formats'
@@ -109,13 +109,17 @@ const showModelNoteEditor = ref(false)
 const noteEditorModel = ref<ModelEntry | null>(null)
 const noteDraft = ref('')
 const showWorkflowMetaEditor = ref(false)
+const showQueueModal = ref(false)
 const workflowMetaEditor = ref<WorkflowEntry | null>(null)
 const workflowNameDraft = ref('')
 const workflowNoteDraft = ref('')
 const workflowMetaSaving = ref(false)
 if (route.query.mode === 'workflow') runMode.value = 'workflow'
 const focusedSeparationJobId = ref<string | null>(null)
+const composingNewJob = ref(false)
+const submittingJob = ref(false)
 const cancellingTaskId = ref<string | null>(null)
+const cancellingQueueJobId = ref<string | null>(null)
 const audioElements = new Map<string, HTMLAudioElement>()
 const audioAccessOrder: string[] = []
 const playingOutputPath = ref('')
@@ -672,7 +676,8 @@ const outputNamingPreviewParts = computed(() => {
 })
 const outputSummaryPath = computed(() => runMode.value === 'workflow' ? normalizedOutputDir.value : outputPreview.value)
 const canStart = computed(() => (
-  !workflowStructureInvalid.value
+  !submittingJob.value
+  && !workflowStructureInvalid.value
   && !outputDirectoryError.value
   && (runMode.value === 'workflow'
     ? Boolean(selectedWorkflow.value) && inputFiles.value.length > 0
@@ -683,8 +688,32 @@ const newestRunningJob = computed(() => {
     .filter(job => job.tasks.some(item => !['done', 'failed', 'cancelled'].includes(item.status)))
     .sort((a, b) => b.createdAt - a.createdAt)[0] || null
 })
+const backgroundRunningJobs = computed(() => task.sessionJobs
+  .filter(job => !['queued', 'done', 'failed', 'cancelled'].includes(job.status))
+  .sort((left, right) => right.updatedAt - left.updatedAt))
+const backgroundQueuedJobs = computed(() => task.sessionJobs
+  .filter(job => job.status === 'queued')
+  .sort((left, right) => left.createdAt - right.createdAt))
+const completedSessionJobs = computed(() => task.sessionJobs
+  .filter(job => job.status === 'done')
+  .sort((left, right) => right.updatedAt - left.updatedAt))
+const recentFailedJobs = computed(() => task.sessionJobs
+  .filter(job => job.status === 'failed')
+  .sort((left, right) => right.updatedAt - left.updatedAt))
+const cancelledSessionJobs = computed(() => task.sessionJobs
+  .filter(job => job.status === 'cancelled')
+  .sort((left, right) => right.updatedAt - left.updatedAt))
+const queueJobs = computed(() => [
+  ...backgroundRunningJobs.value,
+  ...backgroundQueuedJobs.value,
+  ...recentFailedJobs.value,
+  ...completedSessionJobs.value,
+  ...cancelledSessionJobs.value,
+])
+const finishedSessionJobCount = computed(() => recentFailedJobs.value.length + completedSessionJobs.value.length + cancelledSessionJobs.value.length)
+const hasQueueEntries = computed(() => queueJobs.value.length > 0)
 const focusedJob = computed(() => task.getJobById(focusedSeparationJobId.value))
-const currentJob = computed(() => focusedJob.value || newestRunningJob.value)
+const currentJob = computed(() => composingNewJob.value ? null : (focusedJob.value || newestRunningJob.value))
 const focusedBatchTasks = computed(() => currentJob.value?.tasks || [])
 const activeFocusedBatchTask = computed(() => {
   return [...focusedBatchTasks.value]
@@ -700,6 +729,10 @@ const currentTask = computed(() => {
   if (focusedBatchTasks.value.length) return activeFocusedBatchTask.value || focusedBatchTasks.value[0] || null
   return null
 })
+const completedActionOptions = computed<DropdownOption[]>(() => [
+  { key: 'retry', label: t('separate.runAgain') },
+  ...(currentTask.value?.logs.length ? [{ key: 'logs', label: t('tasks.logs') }] : []),
+])
 const currentBatchTasks = computed(() => focusedBatchTasks.value.length ? focusedBatchTasks.value : currentTask.value ? [currentTask.value] : [])
 const currentBatchTotal = computed(() => currentBatchTasks.value.length)
 const currentBatchDoneCount = computed(() => currentBatchTasks.value.filter(item => item.status === 'done').length)
@@ -707,6 +740,7 @@ const currentBatchFailedCount = computed(() => currentBatchTasks.value.filter(it
 const currentBatchCancelledCount = computed(() => currentBatchTasks.value.filter(item => item.status === 'cancelled').length)
 const currentBatchFinishedCount = computed(() => currentBatchDoneCount.value + currentBatchFailedCount.value + currentBatchCancelledCount.value)
 const currentBatchIsMulti = computed(() => currentBatchTotal.value > 1)
+const currentBatchIsQueued = computed(() => currentBatchTasks.value.length > 0 && currentBatchTasks.value.every(item => item.status === 'queued'))
 const taskPanelState = computed<'ready' | 'running' | 'done' | 'failed' | 'cancelled'>(() => {
   const items = currentBatchTasks.value
   if (!items.length) return 'ready'
@@ -783,6 +817,7 @@ const currentBatchActiveIndex = computed(() => {
   return Math.min(currentBatchTotal.value, currentBatchFinishedCount.value + 1)
 })
 const currentBatchTitle = computed(() => {
+  if (currentBatchIsQueued.value) return t('separate.batchQueuedTitle')
   if (!currentBatchIsMulti.value) return t('separate.taskRunningTitle')
   if (taskPanelState.value === 'running') {
     return t('separate.batchRunningTitle', { current: currentBatchActiveIndex.value, total: currentBatchTotal.value })
@@ -791,6 +826,7 @@ const currentBatchTitle = computed(() => {
   return statusLabel(taskPanelState.value)
 })
 const currentBatchLine = computed(() => {
+  if (currentBatchIsQueued.value) return t('separate.batchQueuedHint')
   if (!currentBatchIsMulti.value) return currentTaskFileName.value
   if (taskPanelState.value === 'running' && currentTask.value) {
     return t('separate.batchCurrentInput', { name: getFileName(currentTask.value.input) })
@@ -1655,6 +1691,7 @@ function buildEnsembleWorkflow(): WorkflowEntry {
 }
 
 async function start() {
+  if (submittingJob.value) return
   if (outputDirectoryError.value) {
     message.warning(outputDirectoryError.value)
     return
@@ -1680,6 +1717,7 @@ async function start() {
     message.warning(t('separate.startHintModelMissing'))
     return
   }
+  submittingJob.value = true
   try {
     const result = runMode.value === 'workflow' && selectedWorkflow.value
       ? await task.startWorkflowInference(selectedWorkflow.value, { outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value })
@@ -1687,6 +1725,7 @@ async function start() {
         ? await task.startWorkflowInference(buildEnsembleWorkflow(), { outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value, outputNaming: outputNamingConfig.value })
         : await task.startSeparation({ outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value, outputNaming: outputNamingConfig.value })
     focusedSeparationJobId.value = result?.jobId || newestRunningJob.value?.id || focusedSeparationJobId.value
+    composingNewJob.value = false
     if (runMode.value === 'model' && ensembleEnabled.value && result) {
       ensembleModels.value.forEach((name) => model.recordModelUse(name))
     }
@@ -1698,13 +1737,76 @@ async function start() {
     }
   } catch (err) {
     message.error(err instanceof Error ? err.message : t('toast.taskFailed'))
+  } finally {
+    submittingJob.value = false
   }
 }
 
-function resetForNextSeparation() {
+function beginNextSeparation() {
   stopAllPreviewAudio()
   showLogModal.value = false
   focusedSeparationJobId.value = null
+  composingNewJob.value = true
+}
+
+function focusQueueJob(target: SeparationJob) {
+  composingNewJob.value = false
+  focusedSeparationJobId.value = target.id
+  showQueueModal.value = false
+}
+
+function viewQueueJobLogs(target: SeparationJob) {
+  focusQueueJob(target)
+  void nextTick(() => { showLogModal.value = true })
+}
+
+function dismissQueueJob(target: SeparationJob) {
+  task.removeSessionJob(target.id)
+  if (focusedSeparationJobId.value === target.id) focusedSeparationJobId.value = null
+}
+
+function clearFinishedQueueJobs() {
+  task.clearFinishedSessionJobs()
+}
+
+function queueJobInputSummary(job: SeparationJob) {
+  const first = getFileName(job.primary.input)
+  return job.inputCount > 1
+    ? t('separate.queueBatchInputs', { count: job.inputCount, name: first })
+    : first
+}
+
+async function cancelQueueJob(job: SeparationJob) {
+  if (cancellingQueueJobId.value) return false
+  const targets = job.tasks.filter(item => !['done', 'failed', 'cancelled'].includes(item.status))
+  if (!targets.length) return false
+  cancellingQueueJobId.value = job.id
+  try {
+    let cancelled = 0
+    for (const item of targets) {
+      // Keep cancellation serialized because the Rust worker manager accepts
+      // one cancellation transition at a time.
+      // eslint-disable-next-line no-await-in-loop
+      if (await task.cancelTask(item.id)) cancelled += 1
+    }
+    // A batch shares one Worker process. Cancelling its primary task can stop
+    // the whole Worker, so later child cancellations may legitimately return
+    // false even though the batch cancellation succeeded.
+    return cancelled > 0 || targets.every(item => ['done', 'failed', 'cancelled'].includes(item.status))
+  } finally {
+    cancellingQueueJobId.value = null
+  }
+}
+
+function requestCancelQueueJob(job: SeparationJob) {
+  dialog.warning({
+    title: t('separate.cancelBatchTitle'),
+    content: t('separate.cancelBatchHint', { name: job.model }),
+    positiveText: t('tasks.cancelAction'),
+    negativeText: t('common.cancel'),
+    positiveButtonProps: { type: 'error' },
+    onPositiveClick: () => cancelQueueJob(job),
+  })
 }
 
 function goToResults() {
@@ -1714,6 +1816,14 @@ function goToResults() {
 function openCurrentLogs() {
   if (!currentTask.value) return
   showLogModal.value = true
+}
+
+function handleCompletedAction(key: string | number) {
+  if (key === 'retry') {
+    void retryCurrentTask()
+  } else if (key === 'logs') {
+    openCurrentLogs()
+  }
 }
 
 function handleCancelCurrentTask() {
@@ -1957,10 +2067,15 @@ async function retryCurrentTask() {
                   <span class="stage-badge__dot"></span>
                   {{ statusLabel(currentTask.status) }}
                 </span>
-                <n-button text size="small" :disabled="!currentTask.logs.length" @click="openCurrentLogs">
-                  <template #icon><n-icon :component="TerminalOutline" /></template>
-                  {{ t('tasks.logs') }}
-                </n-button>
+                <div class="stage-hero__top-actions">
+                  <n-button text size="small" @click="showQueueModal = true">
+                    {{ t('separate.batchQueue') }} ({{ queueJobs.length }})
+                  </n-button>
+                  <n-button text size="small" :disabled="!currentTask.logs.length" @click="openCurrentLogs">
+                    <template #icon><n-icon :component="TerminalOutline" /></template>
+                    {{ t('tasks.logs') }}
+                  </n-button>
+                </div>
               </div>
               <div class="stage-hero__title">
                 <h2>{{ currentBatchTitle }}</h2>
@@ -1990,6 +2105,14 @@ async function retryCurrentTask() {
             </div>
             <div class="stage-actions">
               <n-button
+                secondary
+                strong
+                size="large"
+                @click="beginNextSeparation"
+              >
+                {{ t('separate.addNextBatch') }}
+              </n-button>
+              <n-button
                 strong
                 size="large"
                 type="error"
@@ -2011,10 +2134,15 @@ async function retryCurrentTask() {
                   <n-icon :component="taskPanelState === 'done' ? CheckmarkCircle : (taskPanelState === 'failed' ? CloseOutline : PauseOutline)" />
                   {{ statusLabel(currentTask.status) }}
                 </span>
-                <n-button v-if="currentTask.logs.length" text size="small" @click="openCurrentLogs">
-                  <template #icon><n-icon :component="TerminalOutline" /></template>
-                  {{ t('tasks.logs') }}
-                </n-button>
+                <div class="stage-hero__top-actions">
+                  <n-button v-if="hasQueueEntries" text size="small" @click="showQueueModal = true">
+                    {{ t('separate.batchQueue') }} ({{ queueJobs.length }})
+                  </n-button>
+                  <n-button v-if="taskPanelState !== 'done' && currentTask.logs.length" text size="small" @click="openCurrentLogs">
+                    <template #icon><n-icon :component="TerminalOutline" /></template>
+                    {{ t('tasks.logs') }}
+                  </n-button>
+                </div>
               </div>
               <div class="stage-hero__title">
                 <h2>{{ currentBatchIsMulti ? currentBatchTitle : statusLabel(currentTask.status) }}</h2>
@@ -2026,6 +2154,15 @@ async function retryCurrentTask() {
               <div v-if="taskPanelState === 'done'" class="result-path" :title="currentTaskOutputPath">
                 <n-icon :component="FolderOutline" />
                 <code>{{ currentBatchOutputSummary }}</code>
+                <n-button
+                  size="small"
+                  quaternary
+                  :title="t('separate.openOutput')"
+                  @click.stop="task.revealPath(currentTask.outputs[0]?.path || currentTask.output)"
+                >
+                  <template #icon><n-icon :component="OpenOutline" /></template>
+                  {{ t('common.open') }}
+                </n-button>
               </div>
               <div v-else-if="taskSubMessage(currentTask)" class="result-note">{{ taskSubMessage(currentTask) }}</div>
               <section v-if="taskPanelState === 'done' && playableOutputs.length" class="result-preview-panel">
@@ -2069,20 +2206,38 @@ async function retryCurrentTask() {
               </section>
             </div>
             <div class="stage-actions">
-              <n-button v-if="taskPanelState === 'done'" secondary size="large" @click="task.revealPath(currentTask.outputs[0]?.path || currentTask.output)">
-                <template #icon><n-icon :component="OpenOutline" /></template>
-                {{ t('separate.openOutput') }}
-              </n-button>
-              <n-button secondary size="large" @click="retryCurrentTask">
-                <template #icon><n-icon :component="PlayOutline" /></template>
-                {{ t('common.retry') }}
-              </n-button>
-              <n-button secondary size="large" @click="resetForNextSeparation">
-                {{ t('separate.newSeparation') }}
-              </n-button>
-              <n-button v-if="taskPanelState === 'done'" type="primary" size="large" class="stage-actions__primary" @click="goToResults">
-                {{ t('separate.viewResults') }}
-              </n-button>
+              <template v-if="taskPanelState === 'done'">
+                <n-dropdown :options="completedActionOptions" placement="top-end" @select="handleCompletedAction">
+                  <n-button secondary size="large">
+                    {{ t('separate.moreActions') }}
+                    <n-icon :component="ChevronDownOutline" />
+                  </n-button>
+                </n-dropdown>
+                <n-button secondary size="large" @click="goToResults">
+                  {{ t('separate.viewResults') }}
+                </n-button>
+                <n-button type="primary" size="large" class="stage-actions__primary" @click="beginNextSeparation">
+                  {{ t('separate.newSeparation') }}
+                </n-button>
+              </template>
+              <template v-else-if="taskPanelState === 'failed'">
+                <n-button secondary size="large" @click="beginNextSeparation">
+                  {{ t('separate.newSeparation') }}
+                </n-button>
+                <n-button type="primary" size="large" class="stage-actions__primary" @click="retryCurrentTask">
+                  <template #icon><n-icon :component="PlayOutline" /></template>
+                  {{ t('common.retry') }}
+                </n-button>
+              </template>
+              <template v-else>
+                <n-button secondary size="large" @click="retryCurrentTask">
+                  <template #icon><n-icon :component="PlayOutline" /></template>
+                  {{ t('separate.runAgain') }}
+                </n-button>
+                <n-button type="primary" size="large" class="stage-actions__primary" @click="beginNextSeparation">
+                  {{ t('separate.newSeparation') }}
+                </n-button>
+              </template>
             </div>
           </section>
 
@@ -2095,18 +2250,25 @@ async function retryCurrentTask() {
                   <p>{{ runMode === 'workflow' ? t('separate.workflowPanelHint') : t('separate.modelPanelHint') }}</p>
                 </div>
               </div>
-              <div v-if="runMode === 'model'" class="stage-head__extra">
-                <n-select
-                  :value="ensembleEnabled ? 'ensemble' : 'single'"
-                  size="small"
-                  :options="[
-                    { label: t('separate.singleModelMode'), value: 'single' },
-                    { label: t('separate.ensembleMode'), value: 'ensemble' },
-                  ]"
-                  class="model-mode-select"
-                  :aria-label="t('separate.modelModeLabel')"
-                  @update:value="(value: string | number) => { ensembleEnabled = value === 'ensemble' }"
-                />
+              <div class="stage-head__controls">
+                <div v-if="runMode === 'model'" class="stage-head__extra">
+                  <n-select
+                    :value="ensembleEnabled ? 'ensemble' : 'single'"
+                    size="small"
+                    :options="[
+                      { label: t('separate.singleModelMode'), value: 'single' },
+                      { label: t('separate.ensembleMode'), value: 'ensemble' },
+                    ]"
+                    class="model-mode-select"
+                    :aria-label="t('separate.modelModeLabel')"
+                    @update:value="(value: string | number) => { ensembleEnabled = value === 'ensemble' }"
+                  />
+                </div>
+                <n-button class="stage-head__queue" size="small" secondary @click="showQueueModal = true">
+                  <template #icon><n-icon :component="ListOutline" /></template>
+                  {{ t('separate.batchQueue') }}
+                  <span class="stage-head__queue-count" :class="{ 'stage-head__queue-count--active': hasQueueEntries }">{{ queueJobs.length }}</span>
+                </n-button>
               </div>
             </div>
 
@@ -2303,7 +2465,7 @@ async function retryCurrentTask() {
                   <template #icon><n-icon :component="OpenOutline" /></template>
                   {{ t('separate.openOutput') }}
                 </n-button>
-                <n-button type="primary" size="large" class="launch-bar__go" :disabled="!canStart" @click="start">
+                <n-button type="primary" size="large" class="launch-bar__go" :loading="submittingJob" :disabled="!canStart" @click="start">
                   <template #icon><n-icon :component="PlayOutline" /></template>
                   {{ t('separate.startTask') }}
                 </n-button>
@@ -2699,6 +2861,77 @@ async function retryCurrentTask() {
             <n-button type="primary" @click="showNamingModal = false">{{ t('common.close') }}</n-button>
           </div>
         </template>
+      </n-card>
+    </n-modal>
+    <n-modal v-model:show="showQueueModal" style="width:min(720px, 92vw)">
+      <n-card
+        class="batch-queue-modal"
+        :title="t('separate.batchQueue')"
+        :bordered="false"
+        closable
+        role="dialog"
+        aria-modal="true"
+        @close="showQueueModal = false"
+      >
+        <template #header-extra>
+          <n-button
+            v-if="finishedSessionJobCount"
+            size="small"
+            quaternary
+            @click="clearFinishedQueueJobs"
+          >
+            {{ t('separate.clearFinishedTasks') }}
+          </n-button>
+        </template>
+        <div v-if="queueJobs.length" class="batch-queue-list">
+          <article
+            v-for="job in queueJobs"
+            :key="job.id"
+            class="batch-queue-row"
+            :class="`batch-queue-row--${job.status}`"
+          >
+            <button type="button" class="batch-queue-row__main" @click="focusQueueJob(job)">
+              <span class="batch-queue-row__status">
+                <i></i>
+                {{ statusLabel(job.status) }}
+              </span>
+              <strong>{{ job.model }}</strong>
+              <span class="batch-queue-row__input" :title="job.primary.input">{{ queueJobInputSummary(job) }}</span>
+              <n-progress
+                type="line"
+                :percentage="job.progress"
+                :show-indicator="false"
+                :height="5"
+                :border-radius="3"
+              />
+            </button>
+            <div class="batch-queue-row__meta">
+              <span>{{ job.inputCount }} {{ t('separate.queueFileUnit') }}</span>
+              <div class="batch-queue-row__actions">
+                <template v-if="['done', 'failed', 'cancelled'].includes(job.status)">
+                  <n-button size="small" secondary @click="job.status === 'failed' ? viewQueueJobLogs(job) : focusQueueJob(job)">
+                    {{ job.status === 'failed' ? t('tasks.logs') : t('separate.viewTaskDetails') }}
+                  </n-button>
+                  <n-button size="small" quaternary @click="dismissQueueJob(job)">
+                    {{ t('common.remove') }}
+                  </n-button>
+                </template>
+                <n-button
+                  v-else
+                  size="small"
+                  tertiary
+                  type="error"
+                  :loading="cancellingQueueJobId === job.id"
+                  :disabled="Boolean(cancellingQueueJobId)"
+                  @click="requestCancelQueueJob(job)"
+                >
+                  {{ t('tasks.cancelAction') }}
+                </n-button>
+              </div>
+            </div>
+          </article>
+        </div>
+        <n-empty v-else :description="t('separate.queueEmpty')" />
       </n-card>
     </n-modal>
     <n-modal v-model:show="showLogModal" style="width:min(900px, 92vw)">
@@ -3889,6 +4122,46 @@ async function retryCurrentTask() {
   gap: 12px;
 }
 
+.stage-head__queue {
+  flex: 0 0 auto;
+}
+
+.stage-head__controls {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.stage-head__queue-count {
+  min-width: 20px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  margin-left: 3px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--on-surface-muted);
+  background: color-mix(in srgb, var(--outline) 42%, transparent);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-head__queue-count--active {
+  color: var(--primary-strong);
+  background: var(--primary-soft);
+}
+
+.stage-hero__top-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .stage-badge {
   display: inline-flex;
   align-items: center;
@@ -4055,6 +4328,7 @@ async function retryCurrentTask() {
 }
 .result-path .n-icon { flex: 0 0 auto; font-size: 16px; color: var(--primary-strong); }
 .result-path code {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4211,6 +4485,80 @@ async function retryCurrentTask() {
 .stage-actions__primary { min-width: 150px; font-weight: 600; }
 .stage-view--running .stage-actions { justify-content: flex-end; }
 
+
+.batch-queue-list {
+  display: grid;
+  gap: 9px;
+  max-height: min(64vh, 560px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.batch-queue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--outline) 76%, transparent);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--surface-2) 36%, transparent);
+}
+
+.batch-queue-row__main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.batch-queue-row__main:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+  border-radius: 6px;
+}
+
+.batch-queue-row__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--on-surface-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.batch-queue-row__status i {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+.batch-queue-row--queued .batch-queue-row__status i { background: var(--on-surface-muted); }
+.batch-queue-row--failed { border-color: color-mix(in srgb, var(--danger) 36%, var(--outline)); }
+.batch-queue-row--failed .batch-queue-row__status { color: var(--danger); }
+.batch-queue-row--failed .batch-queue-row__status i { background: var(--danger); }
+.batch-queue-row__main strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.batch-queue-row__input { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--on-surface-muted); font-size: 11px; }
+.batch-queue-row__main :deep(.n-progress) { grid-column: 1 / -1; }
+
+.batch-queue-row__meta {
+  display: grid;
+  justify-items: end;
+  gap: 7px;
+  color: var(--on-surface-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.batch-queue-row__actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 
 .log-console {
   max-height: min(62vh, 520px);
@@ -4717,7 +5065,11 @@ async function retryCurrentTask() {
 }
 
 @media (max-width: 640px) {
+  .batch-queue-row { grid-template-columns: minmax(0, 1fr); }
+  .batch-queue-row__meta { grid-template-columns: 1fr auto; align-items: center; justify-items: start; }
   .stage-head { align-items: flex-start; flex-direction: column; }
+  .stage-head__controls { width: 100%; margin-left: 0; }
+  .stage-head__queue { flex: 1 1 auto; }
   .stage-head__extra { width: 100%; }
   .model-mode-control { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .model-mode-control__tab { min-width: 0; }

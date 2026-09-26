@@ -1,5 +1,5 @@
 export const DEFAULT_CONCURRENT_SEPARATIONS = 1
-export const MAX_CONCURRENT_SEPARATIONS = 16
+export const MAX_CONCURRENT_SEPARATIONS = 4
 
 export function normalizeConcurrentSeparations(value: unknown): number {
   const count = Number(value)

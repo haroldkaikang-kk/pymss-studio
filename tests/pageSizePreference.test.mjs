@@ -21,7 +21,13 @@ const vite = await createServer({
       const path = id.replaceAll('\\', '/')
       if (path.endsWith('/src/stores/settings.ts')) {
         return `export function useSettingsStore() {
-          return { maxConcurrentSeparations: 1 }
+          return {
+            maxConcurrentSeparations: 1,
+            outputDir: 'outputs', downloadSource: 'modelscope', downloadMethod: 'aria2c',
+            defaultFormat: 'wav', developerMode: false,
+            getRuntimeDeviceConfig: () => ({ device: 'cpu', deviceIds: [] }),
+            getAudioParams: () => ({}),
+          }
         }`
       }
       if (path.endsWith('/src/i18n/index.ts')) {
@@ -108,6 +114,40 @@ test('separation model list restores and persists its page size preference', asy
 
   assert.equal(storage.writes.at(-1)?.key, 'pymss-studio:separate-state')
   assert.equal(storage.writes.at(-1)?.value.modelListPageSize, 8)
+})
+
+test('session task queue resets on restart without deleting persisted task history', async () => {
+  browserStorage()
+  const pinia = createPinia()
+  const taskStore = useTaskStore(pinia)
+  const modelStore = useModelStore(pinia)
+  stores.push(taskStore, modelStore)
+  await Promise.all([taskStore.initialize(), modelStore.initialize()])
+  modelStore.selectedModel = 'session-model.ckpt'
+  taskStore.addInputFiles(['D:/Audio/one.wav', 'D:/Audio/two.wav'])
+
+  const submitted = await taskStore.startSeparation()
+  assert.equal(submitted.tasks.length, 2)
+  assert.equal(taskStore.sessionJobs.length, 1)
+  assert.equal(taskStore.sessionJobs[0].inputCount, 2)
+
+  taskStore.tasks.forEach((item) => {
+    item.status = 'done'
+    item.outputs = [{ stem: 'Vocals', path: `D:/Outputs/${item.id}.wav` }]
+  })
+  assert.equal(taskStore.sessionJobs[0].status, 'done')
+  assert.equal(taskStore.resultJobs.length, 1)
+  assert.equal(taskStore.clearFinishedSessionJobs(), 1)
+  assert.equal(taskStore.sessionJobs.length, 0)
+  assert.equal(taskStore.resultJobs.length, 1)
+  assert.equal(taskStore.tasks.length, 2)
+
+  await waitForDebouncedSave()
+  const restartedStore = useTaskStore(createPinia())
+  stores.push(restartedStore)
+  await restartedStore.initialize()
+  assert.equal(restartedStore.sessionJobs.length, 0)
+  assert.equal(restartedStore.tasks.length, 2)
 })
 
 test('invalid stored page sizes fall back to each view default', async () => {
