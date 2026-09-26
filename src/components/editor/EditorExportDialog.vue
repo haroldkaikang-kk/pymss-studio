@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { EditorExportFormat } from '@/types/editor'
+import type { EditorExportFormat, EditorExportSampleRate } from '@/types/editor'
 
 const props = defineProps<{
   show: boolean
@@ -9,9 +9,15 @@ const props = defineProps<{
   duration: number
   trackCount: number
   exporting: boolean
+  exportCancelling: boolean
+  exportProgress: number
+  exportProgressText: string
   format: EditorExportFormat
   wavBitDepth: string
   flacBitDepth: string
+  sampleRate: EditorExportSampleRate
+  peakProtection: boolean
+  fileName: string
   exportDir: string
   exportDirResolving: boolean
 }>()
@@ -21,9 +27,13 @@ const emit = defineEmits<{
   'update:format': [value: EditorExportFormat]
   'update:wav-bit-depth': [value: string]
   'update:flac-bit-depth': [value: string]
+  'update:sample-rate': [value: EditorExportSampleRate]
+  'update:peak-protection': [value: boolean]
+  'update:file-name': [value: string]
   'update:export-dir': [value: string]
   pickExportDir: []
   confirm: []
+  cancelExport: []
 }>()
 
 const { t } = useI18n()
@@ -44,10 +54,23 @@ const flacBitDepthOptions = computed(() => [
   { label: 'PCM_24', value: 'PCM_24' },
 ])
 
+const sampleRateOptions = computed(() => [
+  { label: t('editor.exportSampleRateAuto'), value: 'auto' as EditorExportSampleRate },
+  { label: '32000 Hz', value: 32000 as EditorExportSampleRate },
+  { label: '44100 Hz', value: 44100 as EditorExportSampleRate },
+  { label: '48000 Hz', value: 48000 as EditorExportSampleRate },
+])
+
+const sampleRateSummary = computed(() => props.sampleRate === 'auto'
+  ? t('editor.exportSampleRateStrategyValue')
+  : `${props.sampleRate} Hz`)
+
+const peakProtectionRequired = computed(() => props.format !== 'wav' || props.wavBitDepth !== 'FLOAT')
+
 const exportSummaryRows = computed(() => [
   { label: t('editor.totalDuration'), value: props.duration ? `${Math.round(props.duration * 10) / 10}s` : '0s' },
   { label: t('editor.tracks'), value: String(props.trackCount) },
-  { label: t('editor.exportSampleRateStrategy'), value: t('editor.exportSampleRateStrategyValue') },
+  { label: t('editor.exportSampleRateStrategy'), value: sampleRateSummary.value },
 ])
 
 </script>
@@ -60,6 +83,9 @@ const exportSummaryRows = computed(() => [
     :title="t('editor.exportDialogTitle')"
     :bordered="false"
     size="small"
+    :mask-closable="!exporting"
+    :close-on-esc="!exporting"
+    :closable="!exporting"
     style="width: min(640px, calc(100vw - 32px));"
     @update:show="(value: boolean) => emit('update:show', value)"
   >
@@ -67,6 +93,14 @@ const exportSummaryRows = computed(() => [
       <div class="export-dialog__intro">
         <strong>{{ sessionName }}</strong>
         <span>{{ t('editor.exportDialogHint') }}</span>
+      </div>
+
+      <div v-if="exporting" class="export-dialog__progress">
+        <div class="export-dialog__progress-copy">
+          <span>{{ exportProgressText || t('editor.exporting') }}</span>
+          <strong>{{ exportProgress }}%</strong>
+        </div>
+        <n-progress type="line" :percentage="exportProgress" :show-indicator="false" status="info" />
       </div>
 
       <div class="export-dialog__grid">
@@ -79,6 +113,7 @@ const exportSummaryRows = computed(() => [
                 :value="format"
                 :options="exportFormatOptions"
                 size="small"
+                :disabled="exporting"
                 @update:value="(value: EditorExportFormat) => emit('update:format', value)"
               />
             </label>
@@ -89,6 +124,7 @@ const exportSummaryRows = computed(() => [
                 :value="wavBitDepth"
                 :options="wavBitDepthOptions"
                 size="small"
+                :disabled="exporting"
                 @update:value="(value: string) => emit('update:wav-bit-depth', value)"
               />
             </label>
@@ -99,7 +135,31 @@ const exportSummaryRows = computed(() => [
                 :value="flacBitDepth"
                 :options="flacBitDepthOptions"
                 size="small"
+                :disabled="exporting"
                 @update:value="(value: string) => emit('update:flac-bit-depth', value)"
+              />
+            </label>
+
+            <label class="export-dialog__field">
+              <span>{{ t('editor.exportSampleRate') }}</span>
+              <n-select
+                :value="sampleRate"
+                :options="sampleRateOptions"
+                size="small"
+                :disabled="exporting"
+                @update:value="(value: EditorExportSampleRate) => emit('update:sample-rate', value)"
+              />
+            </label>
+
+            <label class="export-dialog__field export-dialog__field--switch">
+              <span>
+                {{ t('editor.exportPeakProtection') }}
+                <small v-if="peakProtectionRequired">{{ t('editor.exportPeakProtectionRequired') }}</small>
+              </span>
+              <n-switch
+                :value="peakProtectionRequired || peakProtection"
+                :disabled="exporting || peakProtectionRequired"
+                @update:value="(value: boolean) => emit('update:peak-protection', value)"
               />
             </label>
           </div>
@@ -108,15 +168,26 @@ const exportSummaryRows = computed(() => [
         <section class="export-dialog__section export-dialog__section--stacked export-dialog__section--path">
           <div class="export-dialog__section-title">{{ t('editor.exportDirSection') }}</div>
           <div class="export-dir">
+            <label class="export-dialog__field">
+              <span>{{ t('editor.exportFileName') }}</span>
+              <n-input
+                :value="fileName"
+                size="small"
+                :disabled="exporting"
+                :placeholder="t('editor.exportFileNamePlaceholder')"
+                @update:value="(value: string) => emit('update:file-name', value)"
+              />
+            </label>
             <div class="export-dir__actions">
               <n-input
                 :value="exportDir"
                 size="small"
                 clearable
+                :disabled="exporting"
                 :placeholder="t('editor.exportDirPlaceholder')"
                 @update:value="(value: string) => emit('update:export-dir', value)"
               />
-              <n-button secondary size="small" :loading="exportDirResolving" @click="emit('pickExportDir')">
+              <n-button secondary size="small" :loading="exportDirResolving" :disabled="exporting" @click="emit('pickExportDir')">
                 {{ t('editor.exportDirBrowse') }}
               </n-button>
             </div>
@@ -141,7 +212,16 @@ const exportSummaryRows = computed(() => [
 
     <template #footer>
       <div class="export-dialog__footer">
-        <n-button secondary @click="emit('update:show', false)">{{ t('common.cancel') }}</n-button>
+        <n-button
+          v-if="exporting"
+          secondary
+          type="warning"
+          :loading="exportCancelling"
+          @click="emit('cancelExport')"
+        >
+          {{ t('common.cancel') }}
+        </n-button>
+        <n-button v-else secondary @click="emit('update:show', false)">{{ t('common.cancel') }}</n-button>
         <n-button type="primary" :loading="exporting" @click="emit('confirm')">{{ t('editor.export') }}</n-button>
       </div>
     </template>
@@ -164,6 +244,28 @@ const exportSummaryRows = computed(() => [
 .export-dialog__grid {
   display: grid;
   gap: 10px;
+}
+
+.export-dialog__progress {
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface-2));
+}
+
+.export-dialog__progress-copy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--on-surface-muted);
+  font-size: 11px;
+}
+
+.export-dialog__progress-copy strong {
+  color: var(--on-surface);
+  font-size: 11px;
 }
 
 .export-dialog__intro {
@@ -191,6 +293,11 @@ const exportSummaryRows = computed(() => [
 .export-dialog__field {
   display: grid;
   gap: 6px;
+}
+
+.export-dialog__field--switch {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
 }
 
 .export-dialog__field span {

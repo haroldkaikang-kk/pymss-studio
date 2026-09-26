@@ -91,17 +91,18 @@ export type EditorAssetTreeNode = {
   assets: EditorAsset[]
 }
 
-export type EditorExportFormat = 'wav' | 'flac' | 'mp3' | 'm4a'
+export type EditorExportFormat = 'wav' | 'flac'
+export type EditorExportSampleRate = 'auto' | 32000 | 44100 | 48000
 export type EditorExportAudioParams = {
   wavBitDepth?: string
   flacBitDepth?: string
-  mp3BitRate?: string
-  m4aBitRate?: string
-  m4aCodec?: string
+  sampleRate?: EditorExportSampleRate
+  peakProtection?: boolean
 }
 
 export type EditorExportOptions = {
   format?: EditorExportFormat
   exportDir?: string
+  fileName?: string
   audioParams?: EditorExportAudioParams
 }

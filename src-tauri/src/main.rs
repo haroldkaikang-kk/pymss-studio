@@ -93,6 +93,8 @@ fn main() {
             commands::app_cmd::download_model,
             commands::app_cmd::editor_project_exists,
             commands::app_cmd::export_editor_mix,
+            commands::app_cmd::start_editor_mix_export,
+            commands::app_cmd::cancel_editor_mix_export,
             commands::app_cmd::start_audio_tool,
             commands::app_cmd::get_app_paths,
             commands::app_cmd::get_env_info,

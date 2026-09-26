@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import i18n, { getCurrentLocale } from '@/i18n'
 import {
   overwriteClipsInRange,
@@ -112,6 +113,37 @@ type ExportResult = {
   sampleRate: number
   channels: number
   format: string
+  peakProtectionApplied?: boolean
+  peakAdjustmentDb?: number
+}
+
+export type EditorExportProgress = {
+  phase: 'preparing' | 'rendering' | 'finalizing' | 'writing' | 'completed'
+  completed: number
+  total: number
+  current: string
+}
+
+type EditorExportWorkerEvent = {
+  type: string
+  taskId?: string | null
+  requestId?: string | null
+  payload?: Record<string, unknown>
+}
+
+type PendingEditorExport = {
+  id: string
+  projectId: string
+  exportDir?: string
+  resolve: (result: ExportResult) => void
+  reject: (error: Error) => void
+}
+
+export class EditorExportCancelledError extends Error {
+  constructor(message = 'Editor export cancelled') {
+    super(message)
+    this.name = 'EditorExportCancelledError'
+  }
 }
 
 type PersistedSession = EditorSession & { version?: number }
@@ -477,6 +509,8 @@ export const useEditorStore = defineStore('editor', () => {
   const loading = ref(false)
   const saving = ref(false)
   const exporting = ref(false)
+  const exportCancelling = ref(false)
+  const exportProgress = ref<EditorExportProgress | null>(null)
   const lastExport = ref<ExportResult | null>(null)
   const lastError = ref<string | null>(null)
   const selectedTrackId = ref<string | null>(null)
@@ -489,6 +523,12 @@ export const useEditorStore = defineStore('editor', () => {
   const redoStack = ref<HistorySnapshot[]>([])
   const interactionDepth = ref(0)
   const pendingPeaks = new Map<string, Promise<EditorSource | null>>()
+  let pendingExport: PendingEditorExport | null = null
+  let exportUnlisten: UnlistenFn | null = null
+  let exportListenerPromise: Promise<void> | null = null
+  let exportStartPromise: Promise<void> | null = null
+  let exportCancelRequested = false
+  let exportRequestSequence = 0
 
   const canUndo = computed(() => undoStack.value.length > 0)
   const canRedo = computed(() => redoStack.value.length > 0)
@@ -715,6 +755,10 @@ export const useEditorStore = defineStore('editor', () => {
   registerWindowCloseGuard(async () => {
     await flushSave()
   }, -100)
+
+  registerWindowCloseGuard(async () => {
+    if (exporting.value) await cancelExport()
+  }, 100)
 
   function selectTrack(trackId: string | null) {
     selectedTrackId.value = trackId
@@ -1576,20 +1620,83 @@ export const useEditorStore = defineStore('editor', () => {
     return { removedSource: true, removedTracks: removedTrackIds.length }
   }
 
+  async function ensureEditorExportListener() {
+    if (!isTauriRuntime() || exportUnlisten) return
+    if (!exportListenerPromise) {
+      exportListenerPromise = listen<EditorExportWorkerEvent>('pymss://worker-event', (event) => {
+        const workerEvent = event.payload
+        const pending = pendingExport
+        const eventId = workerEvent.taskId || workerEvent.requestId
+        if (!pending || eventId !== pending.id) return
+
+        if (workerEvent.type === 'editor_export_progress') {
+          const payload = workerEvent.payload || {}
+          exportProgress.value = {
+            phase: String(payload.phase || 'preparing') as EditorExportProgress['phase'],
+            completed: Math.max(0, Number(payload.completed || 0)),
+            total: Math.max(1, Number(payload.total || 100)),
+            current: String(payload.current || ''),
+          }
+          return
+        }
+
+        if (workerEvent.type === 'editor_mix_exported') {
+          pendingExport = null
+          pending.resolve(workerEvent.payload as ExportResult)
+          return
+        }
+
+        if (workerEvent.type === 'task_cancelled') {
+          pendingExport = null
+          pending.reject(new EditorExportCancelledError())
+          return
+        }
+
+        if (workerEvent.type === 'error') {
+          pendingExport = null
+          pending.reject(new Error(String(workerEvent.payload?.message || 'Editor export failed')))
+        }
+      }).then((unlisten) => {
+        exportUnlisten = unlisten
+      }).finally(() => {
+        exportListenerPromise = null
+      })
+    }
+    await exportListenerPromise
+  }
+
   async function exportMix(options?: EditorExportFormat | EditorExportOptions) {
     if (!session.value) throw new Error('Editor session is not loaded')
+    if (exporting.value) throw new Error('Editor export is already running')
     assertNoMissingSourcesInUse(String(i18n.global.t('editor.assetOfflineBlocked')))
     const normalized = typeof options === 'string'
       ? { format: options, audioParams: undefined }
       : (options || {})
     const fmt = normalized.format || exportFormat.value
+    const taskId = `editor_export_${Date.now().toString(36)}_${++exportRequestSequence}_${Math.random().toString(36).slice(2, 8)}`
     exporting.value = true
+    exportCancelling.value = false
+    exportCancelRequested = false
+    exportProgress.value = { phase: 'preparing', completed: 0, total: 100, current: '' }
     lastError.value = null
     try {
-      const result = await invoke<ExportResult>('export_editor_mix', {
+      await ensureEditorExportListener()
+      if (exportCancelRequested) throw new EditorExportCancelledError()
+      const completion = new Promise<ExportResult>((resolve, reject) => {
+        pendingExport = {
+          id: taskId,
+          projectId: session.value!.id,
+          exportDir: normalized.exportDir,
+          resolve,
+          reject,
+        }
+      })
+      exportStartPromise = invoke<{ taskId: string; started: boolean }>('start_editor_mix_export', {
         payload: {
+          taskId,
           format: fmt,
           exportDir: normalized.exportDir,
+          fileName: normalized.fileName,
           audioParams: normalized.audioParams || {},
           project: {
             id: session.value.id,
@@ -1600,14 +1707,48 @@ export const useEditorStore = defineStore('editor', () => {
             tracks: session.value.tracks.map((track) => trackToExportTrack(track, sourceMap.value.get(track.sourceId))),
           },
         },
-      })
+      }).then(() => undefined)
+      await exportStartPromise
+      exportStartPromise = null
+      const result = await completion
       lastExport.value = result
       return result
     } catch (error) {
-      lastError.value = error instanceof Error ? error.message : String(error)
+      if (pendingExport?.id === taskId) pendingExport = null
+      lastError.value = error instanceof EditorExportCancelledError
+        ? null
+        : error instanceof Error ? error.message : String(error)
       throw error
     } finally {
       exporting.value = false
+      exportCancelling.value = false
+      exportProgress.value = null
+      exportStartPromise = null
+      exportCancelRequested = false
+    }
+  }
+
+  async function cancelPendingExportTask(pending: PendingEditorExport | null) {
+    if (!pending) return false
+    const accepted = await invoke<boolean>('cancel_editor_mix_export', {
+      taskId: pending.id,
+      projectId: pending.projectId,
+      exportDir: pending.exportDir,
+    })
+    return accepted
+  }
+
+  async function cancelExport() {
+    if (!exporting.value || exportCancelling.value) return false
+    exportCancelling.value = true
+    exportCancelRequested = true
+    try {
+      if (exportStartPromise) await exportStartPromise
+      if (!pendingExport) return true
+      return cancelPendingExportTask(pendingExport)
+    } catch (error) {
+      exportCancelling.value = false
+      throw error
     }
   }
 
@@ -1628,6 +1769,8 @@ export const useEditorStore = defineStore('editor', () => {
     loading,
     saving,
     exporting,
+    exportCancelling,
+    exportProgress,
     lastExport,
     lastError,
     projectSummaries,
@@ -1702,6 +1845,7 @@ export const useEditorStore = defineStore('editor', () => {
     removeClip,
     removeSource,
     exportMix,
+    cancelExport,
     setZoom,
     zoomIn,
     zoomOut,

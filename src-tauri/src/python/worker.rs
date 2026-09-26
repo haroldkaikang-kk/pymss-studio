@@ -885,7 +885,59 @@ fn is_background_terminal_event(command: &str, event_type: &str) -> bool {
             matches!(event_type, "error" | "task_done" | "task_cancelled")
         }
         "audio_tools" => matches!(event_type, "error" | "audio_tool_result" | "task_cancelled"),
+        "export_editor_mix" => {
+            matches!(event_type, "error" | "editor_mix_exported" | "task_cancelled")
+        }
         _ => matches!(event_type, "error"),
+    }
+}
+
+fn mark_task_terminal(app: &AppHandle, task_id: &str) {
+    if let Ok(mut terminal) = app.state::<AppState>().terminal_tasks.lock() {
+        terminal.insert(task_id.to_string());
+    }
+}
+
+pub(crate) fn editor_export_task_token(task_id: &str) -> String {
+    let token = task_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(96)
+        .collect::<String>();
+    if token.is_empty() {
+        "sync".to_string()
+    } else {
+        token
+    }
+}
+
+pub(crate) fn cleanup_editor_export_temp_files(directory: &Path, task_id: &str) {
+    let safe_task_id = editor_export_task_token(task_id);
+    let prefix = format!(
+        ".pymss-export-{}-",
+        &safe_task_id
+    );
+    let cancel_name = format!(".pymss-export-{safe_task_id}.cancel");
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let matches_task = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| {
+                (name.starts_with(&prefix) && name.ends_with(".part")) || name == cancel_name
+            });
+        if matches_task {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -1098,6 +1150,9 @@ pub fn spawn_worker_background(
     }
 
     let command_name = command.to_string();
+    let editor_export_directory = (command == "export_editor_mix")
+        .then(|| payload.get("exportDir").and_then(Value::as_str).map(PathBuf::from))
+        .flatten();
     let payload_summary = summarize_payload(&payload);
     session_log::append(
         &app,
@@ -1174,6 +1229,7 @@ pub fn spawn_worker_background(
                         if let Some(envelope_task_id) = envelope.task_id.as_deref() {
                             if registered_task_ids.iter().any(|id| id == envelope_task_id) {
                                 terminal_task_ids.insert(envelope_task_id.to_string());
+                                mark_task_terminal(&app, envelope_task_id);
                             }
                         } else if envelope.event_type == "error" {
                             if let Some(request_id) = envelope
@@ -1182,6 +1238,7 @@ pub fn spawn_worker_background(
                                 .filter(|id| registered_task_ids.iter().any(|task_id| task_id == id))
                             {
                                 terminal_task_ids.insert(request_id.to_string());
+                                mark_task_terminal(&app, request_id);
                             } else {
                                 let message = worker_error_message(&envelope);
                                 if command_name == "update_runtime_core" {
@@ -1190,9 +1247,13 @@ pub fn spawn_worker_background(
                                     emit_task_error_to_all(&app, &registered_task_ids, message);
                                 }
                                 terminal_task_ids.extend(registered_task_ids.iter().cloned());
+                                for registered_task_id in &registered_task_ids {
+                                    mark_task_terminal(&app, registered_task_id);
+                                }
                             }
                         } else {
                             terminal_task_ids.insert(task_id.clone());
+                            mark_task_terminal(&app, &task_id);
                         }
                     }
                     if command_name == "update_runtime_core"
@@ -1226,6 +1287,9 @@ pub fn spawn_worker_background(
         } else {
             None
         };
+        if let Some(directory) = editor_export_directory.as_deref() {
+            cleanup_editor_export_temp_files(directory, &task_id);
+        }
         drop(runtime_access.take());
         // Finish Python cleanup before the terminal event starts the UI's environment refresh.
         if let Some(message) = core_terminal_error {
@@ -1283,7 +1347,10 @@ pub fn spawn_worker_background(
                         "worker exited unexpectedly".to_string(),
                     );
                 }
-                Some(status) if status.success() && command_name == "audio_tools" => {
+                Some(status)
+                    if status.success()
+                        && matches!(command_name.as_str(), "audio_tools" | "export_editor_mix") =>
+                {
                     emit_task_error_to_all(
                         &app,
                         &missing_terminal_task_ids,
@@ -1299,14 +1366,19 @@ pub fn spawn_worker_background(
         let _ = std::fs::remove_file(payload_file);
         let cleanup_state = app.state::<AppState>();
         if let Ok(mut tasks) = cleanup_state.tasks.lock() {
-            for registered_task_id in registered_task_ids {
+            for registered_task_id in &registered_task_ids {
                 if tasks
-                    .get(&registered_task_id)
+                    .get(registered_task_id)
                     .map(|registered| Arc::ptr_eq(registered, &shared_child))
                     .unwrap_or(false)
                 {
-                    tasks.remove(&registered_task_id);
+                    tasks.remove(registered_task_id);
                 }
+            }
+        }
+        if let Ok(mut terminal) = cleanup_state.terminal_tasks.lock() {
+            for registered_task_id in &registered_task_ids {
+                terminal.remove(registered_task_id);
             }
         };
     });
@@ -1599,6 +1671,19 @@ mod tests {
         assert!(is_background_terminal_event("audio_tools", "audio_tool_result"));
         assert!(is_background_terminal_event("audio_tools", "error"));
         assert!(!is_background_terminal_event("audio_tools", "audio_tool_progress"));
+    }
+
+    #[test]
+    fn editor_export_result_is_a_background_terminal_event() {
+        assert!(is_background_terminal_event(
+            "export_editor_mix",
+            "editor_mix_exported"
+        ));
+        assert!(is_background_terminal_event("export_editor_mix", "error"));
+        assert!(!is_background_terminal_event(
+            "export_editor_mix",
+            "editor_export_progress"
+        ));
     }
 
     fn write_bundled_pointer(root: &Path, backend: &str, python_path: &str) -> std::path::PathBuf {

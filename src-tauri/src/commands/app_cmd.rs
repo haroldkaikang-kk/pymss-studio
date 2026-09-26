@@ -4,7 +4,10 @@ use crate::model_dir_migration::{
     PrepareModelDirChangeRequest, RespondModelDirMigrationConflictRequest,
     StartModelDirMigrationRequest,
 };
-use crate::python::worker::{run_worker_once, run_worker_with_payload, spawn_worker_background};
+use crate::python::worker::{
+    cleanup_editor_export_temp_files, editor_export_task_token, run_worker_once,
+    run_worker_with_payload, spawn_worker_background,
+};
 use crate::session_log::{self, DebugLogContent, DebugLogInfo, DebugLogReport};
 use crate::state::{AppState, ProxySettings};
 use crate::storage;
@@ -2036,9 +2039,7 @@ pub async fn editor_project_exists(app: AppHandle, project_id: String) -> AppRes
     Ok(path.exists())
 }
 
-#[tauri::command]
-pub async fn export_editor_mix(app: AppHandle, payload: Value) -> AppResult<Value> {
-    let mut payload = payload;
+fn prepare_editor_export_payload(app: &AppHandle, mut payload: Value) -> AppResult<Value> {
     if let Some(object) = payload.as_object_mut() {
         let project_id = object
             .get("project")
@@ -2054,7 +2055,90 @@ pub async fn export_editor_mix(app: AppHandle, payload: Value) -> AppResult<Valu
             );
         }
     }
+    Ok(payload)
+}
+
+#[tauri::command]
+pub async fn export_editor_mix(app: AppHandle, payload: Value) -> AppResult<Value> {
+    let payload = prepare_editor_export_payload(&app, payload)?;
     run_worker_with_payload(&app, "export_editor_mix", Some(payload))
+}
+
+#[tauri::command]
+pub async fn start_editor_mix_export(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    payload: Value,
+) -> AppResult<Value> {
+    let payload = prepare_editor_export_payload(&app, payload)?;
+    let task_id = payload
+        .get("taskId")
+        .or_else(|| payload.get("requestId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Worker("missing editor export task id".into()))?
+        .to_string();
+    spawn_worker_background(app, state, "export_editor_mix", task_id.clone(), payload)?;
+    Ok(serde_json::json!({ "taskId": task_id, "started": true }))
+}
+
+#[tauri::command]
+pub async fn cancel_editor_mix_export(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    task_id: String,
+    project_id: String,
+    export_dir: Option<String>,
+) -> AppResult<bool> {
+    let directory = match export_dir
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => PathBuf::from(value),
+        None => editor_project_dir(&app, &project_id)?.join("exports"),
+    };
+    if state
+        .terminal_tasks
+        .lock()
+        .map(|terminal| terminal.contains(&task_id))
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    let running = state
+        .tasks
+        .lock()
+        .map(|tasks| tasks.contains_key(&task_id))
+        .unwrap_or(false);
+    if !running {
+        cleanup_editor_export_temp_files(&directory, &task_id);
+        return Ok(false);
+    }
+
+    std::fs::create_dir_all(&directory)?;
+    let cancel_path = directory.join(format!(
+        ".pymss-export-{}.cancel",
+        editor_export_task_token(&task_id)
+    ));
+    std::fs::write(&cancel_path, b"cancel")?;
+
+    for _ in 0..200 {
+        let still_running = state
+            .tasks
+            .lock()
+            .map(|tasks| tasks.contains_key(&task_id))
+            .unwrap_or(false);
+        if !still_running {
+            cleanup_editor_export_temp_files(&directory, &task_id);
+            return Ok(true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
+    let cancelled = cancel_task(app.clone(), state, task_id.clone()).await;
+    cleanup_editor_export_temp_files(&directory, &task_id);
+    cancelled
 }
 
 #[tauri::command]
@@ -2080,6 +2164,14 @@ pub async fn cancel_task(
     state: State<'_, AppState>,
     task_id: String,
 ) -> AppResult<bool> {
+    if state
+        .terminal_tasks
+        .lock()
+        .map(|terminal| terminal.contains(&task_id))
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
     let child = state
         .tasks
         .lock()
@@ -2110,6 +2202,7 @@ pub async fn cancel_task(
             let pid = child.id();
             kill_process_tree(pid);
             let _ = child.kill();
+            let _ = child.wait();
         }
         for cancelled_task_id in cancelled_task_ids {
             let _ = app.emit(
@@ -3056,6 +3149,31 @@ mod tests {
         assert!(!is_effectively_empty_dir(&root));
 
         fs::remove_dir_all(&root).expect("remove test dir");
+    }
+
+    #[test]
+    fn editor_export_temp_cleanup_only_removes_the_cancelled_task_files() {
+        let root = temp_test_dir("editor-export-temp-cleanup");
+        fs::create_dir_all(&root).expect("create export temp root");
+        let cancelled = root.join(".pymss-export-task_one-abcd.wav.part");
+        let mix_buffer = root.join(".pymss-export-task_one-abcd.mix.part");
+        let cancel_token = root.join(".pymss-export-task_one.cancel");
+        let other = root.join(".pymss-export-task_two-abcd.wav.part");
+        let completed = root.join("mix.wav");
+        fs::write(&cancelled, b"partial").expect("write cancelled export temp");
+        fs::write(&mix_buffer, b"partial mix").expect("write cancelled mix temp");
+        fs::write(&cancel_token, b"cancel").expect("write cancelled export token");
+        fs::write(&other, b"partial").expect("write other export temp");
+        fs::write(&completed, b"audio").expect("write completed export");
+
+        cleanup_editor_export_temp_files(&root, "task:one");
+
+        assert!(!cancelled.exists());
+        assert!(!mix_buffer.exists());
+        assert!(!cancel_token.exists());
+        assert!(other.exists());
+        assert!(completed.exists());
+        fs::remove_dir_all(&root).expect("remove export temp root");
     }
 
     #[test]

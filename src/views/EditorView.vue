@@ -108,16 +108,25 @@ const {
   exportFormatDraft,
   exportWavBitDepthDraft,
   exportFlacBitDepthDraft,
+  exportSampleRateDraft,
+  exportPeakProtectionDraft,
+  exportFileNameDraft,
   exportDirDraft,
   exportDirPicking,
+  exportProgressPercentage,
+  exportProgressText,
   openExportDialog,
   setExportDialogVisible,
   setExportFormat,
   setExportWavBitDepth,
   setExportFlacBitDepth,
+  setExportSampleRate,
+  setExportPeakProtection,
+  setExportFileName,
   setExportDir,
   pickExportDir,
   exportMix,
+  cancelExport,
 } = useEditorExport({
   editor,
   settings,
@@ -618,18 +627,28 @@ watch(
       :duration="displayedTimelineDuration"
       :track-count="session?.tracks.length || 0"
       :exporting="editor.exporting"
+      :export-cancelling="editor.exportCancelling"
+      :export-progress="exportProgressPercentage"
+      :export-progress-text="exportProgressText"
       :format="exportFormatDraft"
       :wav-bit-depth="exportWavBitDepthDraft"
       :flac-bit-depth="exportFlacBitDepthDraft"
+      :sample-rate="exportSampleRateDraft"
+      :peak-protection="exportPeakProtectionDraft"
+      :file-name="exportFileNameDraft"
       :export-dir="exportDirDraft"
       :export-dir-resolving="exportDirPicking"
       @update:show="setExportDialogVisible"
       @update:format="setExportFormat"
       @update:wav-bit-depth="setExportWavBitDepth"
       @update:flac-bit-depth="setExportFlacBitDepth"
+      @update:sample-rate="setExportSampleRate"
+      @update:peak-protection="setExportPeakProtection"
+      @update:file-name="setExportFileName"
       @update:export-dir="setExportDir"
       @pick-export-dir="pickExportDir"
       @confirm="exportMix"
+      @cancel-export="cancelExport"
     />
   </div>
 </template>

@@ -16,6 +16,7 @@ pub struct ProxySettings {
 pub struct AppState {
     pub tasks: Mutex<HashMap<String, SharedChild>>,
     pub cancelled_tasks: Mutex<HashSet<String>>,
+    pub terminal_tasks: Mutex<HashSet<String>>,
     pub migrations: Arc<Mutex<HashMap<String, SharedMigrationSession>>>,
     pub proxy_settings: Mutex<ProxySettings>,
 }
@@ -25,6 +26,7 @@ impl AppState {
         Self {
             tasks: Mutex::new(HashMap::new()),
             cancelled_tasks: Mutex::new(HashSet::new()),
+            terminal_tasks: Mutex::new(HashSet::new()),
             migrations: Arc::new(Mutex::new(HashMap::new())),
             proxy_settings: Mutex::new(ProxySettings {
                 mode: "system".into(),
