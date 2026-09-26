@@ -771,6 +771,29 @@ test('overview metadata edits remain available to retry after a regular save fai
   assert.deepEqual(messages, [{ level: 'error', text: 'disk unavailable' }])
 })
 
+test('rapid workflow default changes are serialized and keep the latest value', async () => {
+  const env = environment()
+  await env.store.initialize()
+  const page = env.mount(WorkflowsView)
+  const gate = deferred()
+  let defaultsWrites = 0
+  env.mutate = mutation => {
+    if (mutation.action !== 'upsert') return undefined
+    defaultsWrites += 1
+    return defaultsWrites === 1 ? gate.promise : undefined
+  }
+
+  page.state.updateSelectedDefaultNormalize(true)
+  page.state.updateSelectedDefaultNormalize(false)
+  gate.resolve()
+  await flush()
+  await flush()
+
+  assert.equal(defaultsWrites, 2)
+  assert.equal(env.store.selectedWorkflow.definition.defaults.inference_params.normalize, false)
+  assert.equal(messages.some(item => item.level === 'error'), false)
+})
+
 test('saving a legacy workflow without persisted metadata migrates it instead of duplicating it', async () => {
   const env = environment()
   const legacy = entry('temporary')

@@ -41,10 +41,14 @@ const {
   renderSimpleOutputFilename,
 } = await vite.ssrLoadModule('/src/utils/workflowSimple.ts')
 const {
+  analyzeSimpleModelChangeImpact,
+  analyzeSimpleNodeRemovalImpact,
+  canMoveSimpleStep,
   canConnectSimple,
   cleanupSimpleDraft,
   connectSimple,
   disconnectSimple,
+  moveSimpleStep,
   simpleEnsembleInputTarget,
   simpleOutputRef,
   simpleSaveTarget,
@@ -345,6 +349,71 @@ test('simple node editor keeps unselected stems available for downstream steps',
   assert.equal(canConnectSimple(draft, simpleOutputRef('step1', 'vocals'), 'save').ok, true)
 })
 
+test('simple editor reports collateral links and saved outputs before destructive changes', () => {
+  const draft = hydrateSimpleWorkflow({
+    version: 1,
+    defaults: { device: 'auto', output_format: 'wav', inference_params: { normalize: true } },
+    steps: [
+      {
+        id: 'source', model: 'four-stem.ckpt', input: 'input',
+        stems: ['Vocals', 'Instrumental'],
+        save: { Vocals: 'Default', Instrumental: 'Default' },
+        output_names: {},
+      },
+      { id: 'cleanup', model: 'cleanup.ckpt', input: 'source.Vocals', stems: ['Voice'], save: {}, output_names: {} },
+      { id: 'master', model: 'master.ckpt', input: 'blend.Mix', stems: ['Master'], save: {}, output_names: {} },
+    ],
+    ensembles: [{
+      id: 'blend',
+      inputs: [{ source: 'input', weight: 1 }, { source: 'source.Instrumental', weight: 1 }],
+      algorithm: 'avg_wave',
+      output_stem: 'Mix',
+      save: 'Default',
+      output_name: '%filename%_%stem%',
+    }],
+  })
+
+  assert.deepEqual(
+    analyzeSimpleModelChangeImpact(draft, 'source', ['Instrumental']),
+    { connections: 1, savedOutputs: 1 },
+  )
+  assert.deepEqual(
+    analyzeSimpleNodeRemovalImpact(draft, 'source'),
+    { connections: 2, savedOutputs: 2 },
+  )
+  assert.deepEqual(
+    analyzeSimpleNodeRemovalImpact(draft, 'blend'),
+    { connections: 1, savedOutputs: 1 },
+  )
+
+  const rebuilt = buildSimpleWorkflowDefinition(draft)
+  assert.equal(rebuilt.defaults.inference_params.normalize, true)
+
+  draft.steps[0].outputNames.Vocals = ''
+  cleanupSimpleDraft(draft)
+  assert.equal(draft.steps[0].outputNames.Vocals, '%filename%_%stem%_%model%')
+})
+
+test('simple editor can reorder independent steps without breaking dependencies', () => {
+  const draft = hydrateSimpleWorkflow({
+    version: 1,
+    steps: [
+      { id: 'source', model: 'a.ckpt', input: 'input', stems: ['Vocals'], save: {} },
+      { id: 'cleanup', model: 'b.ckpt', input: 'source.Vocals', stems: ['Clean'], save: {} },
+      { id: 'inserted', model: 'c.ckpt', input: 'source.Vocals', stems: ['Processed'], save: {} },
+    ],
+  })
+
+  assert.equal(canMoveSimpleStep(draft, 'source', 1), false)
+  assert.equal(canMoveSimpleStep(draft, 'inserted', -1), true)
+  assert.equal(moveSimpleStep(draft, 'inserted', -1), true)
+  assert.deepEqual(draft.steps.map(step => step.id), ['source', 'inserted', 'cleanup'])
+  assert.equal(
+    canConnectSimple(draft, 'inserted.Processed', simpleStepInputTarget('cleanup')).ok,
+    true,
+  )
+})
+
 test('simple editor round-trips Ensemble nodes and validates their connections', () => {
   const definition = {
     version: 1,
@@ -422,6 +491,53 @@ test('simple editor round-trips Ensemble nodes and validates their connections',
   draft.ensembles = []
   cleanupSimpleDraft(draft)
   assert.equal(draft.steps[1].input, '')
+})
+
+test('simple editor supports forward Ensemble chains and keeps renamed references valid', () => {
+  const definition = {
+    version: 1,
+    defaults: { device: 'auto', output_format: 'wav' },
+    steps: [
+      { id: 'First', model: 'a.ckpt', input: 'INPUT', stems: ['Vocals'], save: {}, output_names: {} },
+      { id: 'second', model: 'b.ckpt', input: 'input', stems: ['Vocals'], save: {}, output_names: {} },
+      { id: 'cleanup', model: 'c.ckpt', input: 'polish.Final', stems: ['Clean'], save: { Clean: 'Default' }, output_names: {} },
+    ],
+    ensembles: [
+      {
+        id: 'Blend',
+        inputs: [{ source: 'first.vocals', weight: 1 }, { source: 'second.Vocals', weight: 1 }],
+        algorithm: 'avg_wave', output_stem: 'Vocals', save: false,
+      },
+      {
+        id: 'polish',
+        inputs: [{ source: 'blend.vocals', weight: 1 }, { source: 'input', weight: 0.25 }],
+        algorithm: 'avg_fft', output_stem: 'Final', save: false,
+      },
+    ],
+  }
+
+  assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: true, reasonCodes: [] })
+  const draft = hydrateSimpleWorkflow(definition)
+  assert.equal(
+    canConnectSimple(draft, 'blend.vocals', simpleEnsembleInputTarget('polish', 0)).ok,
+    true,
+  )
+  assert.deepEqual(
+    canConnectSimple(draft, 'polish.Final', simpleEnsembleInputTarget('Blend', 0)),
+    { ok: false, reason: 'forward-link' },
+  )
+  assert.deepEqual(
+    canConnectSimple(draft, 'polish.Final', simpleStepInputTarget('First')),
+    { ok: false, reason: 'forward-link' },
+  )
+
+  cleanupSimpleDraft(draft)
+  assert.equal(draft.steps[0].input, 'input')
+  assert.equal(draft.ensembles[0].inputs[0].source, 'First.Vocals')
+  assert.equal(draft.ensembles[1].inputs[0].source, 'Blend.Vocals')
+  updateSimpleEnsembleOutputStem(draft, draft.ensembles[0], 'Lead')
+  assert.equal(draft.ensembles[1].inputs[0].source, 'Blend.Lead')
+  assert.equal(getWorkflowDefinitionIssue(buildSimpleWorkflowDefinition(draft)), null)
 })
 
 test('simple runtime preparation materializes defaults without mutating the stored workflow', () => {

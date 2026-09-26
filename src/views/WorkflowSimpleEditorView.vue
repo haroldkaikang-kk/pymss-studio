@@ -11,12 +11,14 @@ import WorkflowRevisionConflictModal from '@/components/workflow/WorkflowRevisio
 import { useModelStore } from '@/stores/model'
 import { WorkflowRevisionConflictError, useWorkflowStore, type WorkflowEntry } from '@/stores/workflow'
 import {
+  analyzeSimpleWorkflow,
   buildSimpleWorkflowDefinition,
   configuredStemsFor,
   createDefaultSimpleEditorUi,
   createStepDraft,
   hydrateSimpleWorkflow,
   type SimpleDraft,
+  type SimpleWorkflowReasonCode,
 } from '@/utils/workflowSimple'
 import {
   canConnectSimple,
@@ -29,11 +31,11 @@ import { isSimpleWorkflowDefinition } from '@/workflows/formats'
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const workflow = useWorkflowStore()
 const model = useModelStore()
 const { workflows } = storeToRefs(workflow)
-const { downloadedModels } = storeToRefs(model)
+const { downloadedModels, selectedModel } = storeToRefs(model)
 
 const currentWindow = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window ? getCurrentWindow() : null
 const isMacOS = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform)
@@ -46,6 +48,7 @@ const draft = ref<SimpleDraft>(hydrateSimpleWorkflow({ steps: [] }))
 const editingId = ref('')
 const expectedUpdatedAt = ref<number | undefined>()
 const loaded = ref(false)
+const loadError = ref('')
 const editorRenderKey = ref(0)
 const saving = ref(false)
 const initialSnapshot = ref('')
@@ -65,14 +68,25 @@ function snapshot() {
 
 const dirty = computed(() => loaded.value && snapshot() !== initialSnapshot.value)
 
+const simpleReasonKeys: Record<SimpleWorkflowReasonCode, string> = {
+  graph_workflow: 'workflows.simpleReasonGraphWorkflow',
+  advanced_parameters: 'workflows.simpleReasonAdvancedParameters',
+  invalid_definition: 'workflows.simpleReasonInvalidDefinition',
+}
+
+function blockUnsupportedEntry(reasonCodes: SimpleWorkflowReasonCode[]) {
+  const reason = reasonCodes.map(code => t(simpleReasonKeys[code])).join(' ')
+  loadError.value = t('workflows.simpleEditorBlockedHint', { reason })
+  loaded.value = false
+  initialSnapshot.value = ''
+}
+
 const formError = computed(() => {
   if (!name.value.trim()) return t('workflows.nameRequired')
   if (!draft.value.steps.length) return t('workflows.stepsRequired')
-  const downloaded = new Set(downloadedModels.value.map(item => item.name))
   for (const [index, step] of draft.value.steps.entries()) {
     const stepLabel = t('workflows.stepTitle', { index: index + 1 })
     if (!step.model.trim()) return t('workflows.stepModelRequired', { id: stepLabel })
-    if (!downloaded.has(step.model.trim())) return t('workflows.stepModelNotDownloaded', { id: stepLabel })
     if (!step.input.trim()) return t('workflows.stepInputRequired', { id: stepLabel })
     if (!canConnectSimple(draft.value, step.input, simpleStepInputTarget(step.id)).ok) return t('workflows.invalidConnection')
     if (!step.stems.length) return t('workflows.stepStemsRequired', { id: stepLabel })
@@ -93,12 +107,24 @@ const formError = computed(() => {
   if (!hasSavedStep && !hasSavedEnsemble) return t('workflows.workflowNoSaveOutputs')
   return ''
 })
+const modelAdvisory = computed(() => {
+  const downloaded = new Set(downloadedModels.value.map(item => item.name))
+  const missingIndex = draft.value.steps.findIndex(step => !downloaded.has(step.model.trim()))
+  return missingIndex >= 0
+    ? t('workflows.stepModelNotDownloaded', { id: t('workflows.stepTitle', { index: missingIndex + 1 }) })
+    : ''
+})
 const canSave = computed(() => !formError.value && !saving.value)
+const canRun = computed(() => !formError.value && !saving.value)
 
 function createExampleDraft(): SimpleDraft {
   const example = hydrateSimpleWorkflow({ steps: [] })
   const step = createStepDraft(0)
-  const modelEntry = downloadedModels.value[0]
+  const modelEntry = downloadedModels.value.find(item => item.name === selectedModel.value)
+    || [...downloadedModels.value].sort((left, right) => left.name.localeCompare(
+      right.name,
+      locale.value === 'zh-CN' ? 'zh-CN' : 'en',
+    ))[0]
   if (modelEntry) {
     step.model = modelEntry.name
     step.stems = configuredStemsFor(modelEntry)
@@ -112,8 +138,16 @@ function createExampleDraft(): SimpleDraft {
 
 function loadEntry(entry?: WorkflowEntry | null) {
   editingId.value = entry?.id || ''
-  name.value = entry?.name || '新建工作流'
+  name.value = entry?.name || t('workflows.newWorkflow')
   description.value = entry?.description || ''
+  loadError.value = ''
+  if (entry) {
+    const analysis = analyzeSimpleWorkflow(entry.definition)
+    if (!analysis.editable) {
+      blockUnsupportedEntry(analysis.reasonCodes)
+      return
+    }
+  }
   const hydrated = entry && isSimpleWorkflowDefinition(entry.definition)
     ? hydrateSimpleWorkflow(entry.definition)
     : hydrateSimpleWorkflow({ steps: [] })
@@ -264,7 +298,7 @@ function saveConflictCopy() {
   showRevisionConflict.value = false
   editingId.value = ''
   expectedUpdatedAt.value = undefined
-  name.value = `${pending.name} Copy`
+  name.value = t('workflows.copyName', { name: pending.name })
   void persist()
 }
 
@@ -286,7 +320,13 @@ onMounted(async () => {
     })
   }
   const id = String(route.query.workflowId || '').trim()
-  loadEntry(id ? workflows.value.find(item => item.id === id) : null)
+  const entry = id ? workflows.value.find(item => item.id === id) : null
+  if (id && !entry) {
+    editingId.value = id
+    blockUnsupportedEntry(['invalid_definition'])
+  } else {
+    loadEntry(entry)
+  }
   await refreshMaximized()
   if (!currentWindow || currentWindow.label === 'main') return
   try { unlistenResize = await currentWindow.onResized(refreshMaximized) } catch {}
@@ -342,8 +382,13 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </header>
+    <div v-if="loadError" class="simple-editor-page__blocked">
+      <n-result status="warning" :title="t('workflows.simpleEditorBlockedTitle')" :description="loadError">
+        <template #footer><n-button type="primary" @click="destroyWindow">{{ t('workflows.returnToWorkflows') }}</n-button></template>
+      </n-result>
+    </div>
     <WorkflowSimpleNodeEditor
-      v-if="loaded"
+      v-else-if="loaded"
       :key="editorRenderKey"
       v-model:draft="draft"
       v-model:name="name"
@@ -351,7 +396,9 @@ onBeforeUnmount(() => {
       :models="downloadedModels"
       :saving="saving"
       :form-error="formError"
+      :advisory="modelAdvisory"
       :can-save="canSave"
+      :can-run="canRun"
       @save="persist"
       @close="closeEditor"
       @run="runWorkflow"
@@ -381,6 +428,8 @@ onBeforeUnmount(() => {
 .simple-editor-chrome__actions button:hover { background: var(--surface-2); color: var(--on-surface); }
 .simple-editor-chrome__actions button.danger:hover { background: var(--danger); color: #fff; }
 .simple-editor-page__prompt-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.simple-editor-page__blocked { height: 100%; display: grid; place-items: center; padding: 32px; }
+.simple-editor-page--custom-chrome > .simple-editor-page__blocked { height: calc(100% - 40px); }
 .simple-editor-page > :deep(.simple-node-editor) { height: 100%; }
 .simple-editor-page--custom-chrome > :deep(.simple-node-editor) { height: calc(100% - 40px); }
 </style>

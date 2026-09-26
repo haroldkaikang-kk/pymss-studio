@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from types import ModuleType, SimpleNamespace
 import tempfile
 import unittest
@@ -161,6 +163,25 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
         }
         self.assertFalse(_simple_output_names(definition))
         self.assertIs(_prepare_simple_runtime_definition(definition), definition)
+
+    def test_studio_simple_workflow_keeps_default_filename_behavior_when_template_is_empty(self) -> None:
+        definition = {
+            "version": 1,
+            "defaults": {"output_format": "flac"},
+            "studio": {"editor": "simple", "viewport": {"x": 0, "y": 0, "zoom": 1}, "nodes": {}},
+            "steps": [{
+                "id": "split",
+                "save": {"Vocals": "Default"},
+                "output_names": {},
+            }],
+        }
+
+        self.assertTrue(_simple_output_names(definition))
+        runtime = _prepare_simple_runtime_definition(definition)
+        self.assertNotIn("studio", runtime)
+        self.assertEqual(runtime["steps"][0]["save"], {"Vocals": "Default"})
+        self.assertEqual(runtime["steps"][0]["output_names"], {})
+        self.assertEqual(runtime["steps"][0]["output_format"], "flac")
 
     def test_editor_layout_metadata_is_removed_from_runtime_definition(self) -> None:
         definition = {
@@ -360,6 +381,75 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
         ]
         self.assertEqual(len(link_ids), len(set(link_ids)))
 
+    def test_simple_ensemble_can_feed_a_later_ensemble(self) -> None:
+        class DAGLink:
+            def __init__(self, **values):
+                self.__dict__.update(values)
+
+        class DAGNode:
+            def __init__(self, *, id, type, inputs, data, title=""):
+                self.id = id
+                self.type = type
+                self.inputs = inputs
+                self.data = data
+                self.title = title
+
+        graph_module = ModuleType("pymss.graph")
+        graph_module.DAGLink = DAGLink
+        graph_module.DAGNode = DAGNode
+        graph_module.AUDIO = "AUDIO"
+        graph_module.STRING = "STRING"
+        pymss_module = ModuleType("pymss")
+        pymss_module.graph = graph_module
+        dag = SimpleNamespace(nodes=[
+            DAGNode(id="input", type="input_audio", inputs=[], data={}),
+            DAGNode(id="step:first", type="mss_separate", inputs=[], data={}),
+            DAGNode(id="step:second", type="mss_separate", inputs=[], data={}),
+        ])
+        definition = {
+            "steps": [
+                {"id": "first", "stems": ["Vocals"]},
+                {"id": "second", "stems": ["Vocals"]},
+            ],
+            "ensembles": [
+                {
+                    "id": "blend",
+                    "inputs": [
+                        {"source": "first.Vocals", "weight": 1},
+                        {"source": "second.Vocals", "weight": 1},
+                    ],
+                    "algorithm": "avg_wave",
+                    "output_stem": "Vocals",
+                    "save": False,
+                },
+                {
+                    "id": "polish",
+                    "inputs": [
+                        {"source": "blend.Vocals", "weight": 1},
+                        {"source": "input", "weight": 0.25},
+                    ],
+                    "algorithm": "avg_fft",
+                    "output_stem": "Final",
+                    "save": False,
+                },
+            ],
+        }
+
+        with patch.dict("sys.modules", {"pymss": pymss_module, "pymss.graph": graph_module}):
+            metadata = _apply_simple_ensembles(
+                dag,
+                definition,
+                input_path="D:/Audio/song.wav",
+                output_format="wav",
+            )
+
+        blend = next(node for node in dag.nodes if node.id == "studio:ensemble:blend")
+        polish = next(node for node in dag.nodes if node.id == "studio:ensemble:polish")
+        self.assertEqual(metadata, [])
+        self.assertEqual(polish.inputs[0].source_node_id, blend.id)
+        self.assertEqual(polish.inputs[0].source_slot, 0)
+        self.assertEqual(polish.inputs[1].source_node_id, "input")
+
     def test_simple_ensemble_rejects_non_finite_weights_in_worker(self) -> None:
         class DAGLink:
             def __init__(self, **values):
@@ -462,6 +552,85 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
             self.assertEqual(finalized, [str(output_dir / "小蓝背心 - 灯火通明_Instrumental_model.wav")])
             self.assertTrue(Path(finalized[0]).is_file())
             self.assertFalse(generated.exists())
+
+    def test_simple_output_publish_atomically_avoids_concurrent_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_dir = root / "results"
+            first_root = root / "task-a"
+            second_root = root / "task-b"
+            first_root.mkdir()
+            second_root.mkdir()
+            first = first_root / "temporary.wav"
+            second = second_root / "temporary.wav"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            barrier = Barrier(2)
+
+            def publish(source: Path, source_root: Path) -> str:
+                barrier.wait()
+                return _finalize_simple_output_paths(
+                    [str(source)],
+                    [{"stem": "Vocals", "filename": "song_Vocals.wav"}],
+                    output_dir,
+                    source_root=source_root,
+                )[0]
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(publish, first, first_root),
+                    executor.submit(publish, second, second_root),
+                ]
+                published = [Path(future.result()) for future in futures]
+
+            self.assertEqual({path.name for path in published}, {"song_Vocals.wav", "song_Vocals_2.wav"})
+            self.assertEqual({path.read_bytes() for path in published}, {b"first", b"second"})
+            self.assertFalse(first.exists())
+            self.assertFalse(second.exists())
+
+    def test_simple_output_publish_preserves_legacy_save_subdirectory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "task"
+            source = source_root / "stems" / "Vocals.wav"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"audio")
+            output_dir = root / "results"
+
+            finalized = _finalize_simple_output_paths(
+                [str(source)],
+                [],
+                output_dir,
+                source_root=source_root,
+            )
+
+            self.assertEqual(finalized, [str(output_dir / "stems" / "Vocals.wav")])
+            self.assertEqual(Path(finalized[0]).read_bytes(), b"audio")
+            self.assertFalse(source.exists())
+
+    def test_simple_output_publish_uses_exclusive_copy_without_hard_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "task"
+            source_root.mkdir()
+            source = source_root / "temporary.wav"
+            source.write_bytes(b"audio")
+            output_dir = root / "results"
+            output_dir.mkdir()
+            (output_dir / "song.wav").write_bytes(b"existing")
+
+            with patch.object(worker_workflows.os, "link", side_effect=OSError("unsupported")):
+                finalized = _finalize_simple_output_paths(
+                    [str(source)],
+                    [{"stem": "Vocals", "filename": "song.wav"}],
+                    output_dir,
+                    source_root=source_root,
+                )
+
+            self.assertEqual(finalized, [str(output_dir / "song_2.wav")])
+            self.assertEqual((output_dir / "song.wav").read_bytes(), b"existing")
+            self.assertEqual((output_dir / "song_2.wav").read_bytes(), b"audio")
+            self.assertFalse(source.exists())
 
     def test_output_stem_matches_single_separation_for_prefixed_filename(self) -> None:
         self.assertEqual(

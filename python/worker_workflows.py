@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import shutil
 import tempfile
 import traceback
 from contextlib import ExitStack
@@ -215,7 +217,10 @@ _WINDOWS_RESERVED_NAMES = {
 
 
 def _simple_output_names(definition: dict[str, Any]) -> bool:
-    """Return whether a simple definition uses Studio filename metadata."""
+    """Return whether a simple definition uses Studio filename behavior."""
+    studio = definition.get("studio")
+    if isinstance(studio, dict) and studio.get("editor") == "simple":
+        return True
     steps = definition.get("steps")
     return isinstance(steps, list) and any(
         isinstance(step, dict)
@@ -234,6 +239,8 @@ def _prepare_simple_runtime_definition(definition: dict[str, Any]) -> dict[str, 
     force the default directory and apply the workflow output format to every
     save node; imported YAML without this metadata keeps its original behavior.
     """
+    studio = definition.get("studio")
+    uses_studio_editor = isinstance(studio, dict) and studio.get("editor") == "simple"
     has_output_names = _simple_output_names(definition)
     has_ensembles = isinstance(definition.get("ensembles"), list) and bool(definition.get("ensembles"))
     has_legacy_intermediate_policy = "save_intermediate" in definition
@@ -274,11 +281,12 @@ def _prepare_simple_runtime_definition(definition: dict[str, Any]) -> dict[str, 
     if isinstance(defaults, dict):
         output_format = str(defaults.get("output_format") or "wav").strip().lower() or "wav"
     for step in transient.get("steps", []):
-        if (
-            not isinstance(step, dict)
-            or not isinstance(step.get("output_names"), dict)
-            or not step.get("output_names")
-        ):
+        if not isinstance(step, dict):
+            continue
+        if uses_studio_editor:
+            if not isinstance(step.get("output_names"), dict):
+                step["output_names"] = {}
+        elif not isinstance(step.get("output_names"), dict) or not step.get("output_names"):
             continue
         save = step.get("save")
         if isinstance(save, dict):
@@ -632,43 +640,73 @@ def _finalize_simple_output_paths(
     saved_paths: list[str],
     output_metadata: list[dict[str, str]],
     output_dir: Path,
+    *,
+    source_root: Path | None = None,
 ) -> list[str]:
-    """Rename graph-produced temporary files to Studio's Unicode filenames."""
-    if len(saved_paths) != len(output_metadata):
-        return saved_paths
+    """Publish graph outputs without overwriting files from concurrent tasks.
+
+    Simple workflows run inside a task-owned directory.  Each completed file
+    is hard-linked into the final directory, which makes claiming the target
+    name atomic while avoiding a second copy of large audio files.  Filesystems
+    without hard-link support fall back to an exclusive-create copy.  Legacy
+    save folders are preserved when Studio filename metadata is unavailable.
+    """
+
+    def publish(source: Path, preferred: Path) -> Path:
+        preferred.parent.mkdir(parents=True, exist_ok=True)
+        if source == preferred:
+            return source
+        for collision_index in range(1, 1000):
+            target = preferred if collision_index == 1 else preferred.with_name(
+                f"{preferred.stem}_{collision_index}{preferred.suffix}"
+            )
+            try:
+                os.link(source, target)
+            except FileExistsError:
+                continue
+            except OSError:
+                # Some removable/network filesystems do not support hard
+                # links.  ``xb`` still claims the name atomically, so another
+                # worker cannot open the same destination concurrently.
+                try:
+                    writer = target.open("xb")
+                except FileExistsError:
+                    continue
+                try:
+                    with writer, source.open("rb") as reader:
+                        shutil.copyfileobj(reader, writer, length=1024 * 1024)
+                except Exception:
+                    writer.close()
+                    target.unlink(missing_ok=True)
+                    raise
+            try:
+                source.unlink(missing_ok=True)
+            except OSError:
+                # The published target is already complete. The enclosing
+                # TemporaryDirectory will retry removal of the private source.
+                pass
+            return target
+        raise FileExistsError(f"Failed to reserve a unique workflow output filename: {preferred}")
+
     finalized: list[str] = []
-    reserved_names: set[str] = set()
-    for source_value, metadata in zip(saved_paths, output_metadata):
+    for index, source_value in enumerate(saved_paths):
         source = Path(source_value)
+        metadata = output_metadata[index] if index < len(output_metadata) else {}
         filename = str(metadata.get("filename") or "").strip()
-        if not filename:
+        if filename:
+            candidate = output_dir / filename
+        elif source_root is not None:
+            try:
+                relative = source.resolve().relative_to(source_root.resolve())
+            except ValueError as exc:
+                raise RuntimeError("Workflow output is outside its task directory") from exc
+            candidate = output_dir / relative
+        else:
             finalized.append(source_value)
             continue
-        candidate = output_dir / filename
-        base = candidate.stem
-        suffix = candidate.suffix
-        for collision_index in range(1, 1000):
-            target = candidate if collision_index == 1 else output_dir / f"{base}_{collision_index}{suffix}"
-            if target == source:
-                candidate = target
-                break
-            if target.name.casefold() in reserved_names or target.exists():
-                continue
-            candidate = target
-            break
-        reserved_names.add(candidate.name.casefold())
-        if source != candidate:
-            if not source.is_file():
-                finalized.append(str(source))
-                continue
-            try:
-                source.replace(candidate)
-            except OSError:
-                # Keep the actual path when another process has the temporary
-                # file open; the task still reports a valid generated output.
-                finalized.append(str(source))
-                continue
-        finalized.append(str(candidate))
+        if not source.is_file():
+            raise RuntimeError(f"Workflow output is missing: {source}")
+        finalized.append(str(publish(source, candidate)))
     return finalized
 
 
@@ -769,7 +807,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             output_format=output_format,
             output_dir=task_output_dir,
             reserved_names=reserved_simple_names,
-            apply_names=_simple_output_names(data),
+            apply_names=_simple_output_names(simple_definition if simple_definition is not None else data),
         )
         if simple_definition is not None:
             simple_output_metadata.extend(_apply_simple_ensembles(
@@ -785,9 +823,18 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         dag = graph.load_comfy_file(workflow_path)
 
     task_output_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths: list[str] = []
+    output_records: list[Any | None] = []
     with ExitStack() as cleanup:
         graph_output_dir = task_output_dir
-        if ensemble_stem is not None:
+        if simple_definition is not None:
+            # Never let pymss write a simple-workflow output directly into the
+            # shared destination.  Publishing below atomically claims the
+            # final filename, including when multiple workers finish together.
+            graph_output_dir = Path(cleanup.enter_context(tempfile.TemporaryDirectory(
+                prefix=".pymss-workflow-", dir=task_output_dir,
+            )))
+        elif ensemble_stem is not None:
             # The ensemble node loses source/stem metadata and saves as audio.ext. Isolate that
             # intermediate file, then reserve and rename the final output on the same filesystem.
             graph_output_dir = Path(cleanup.enter_context(tempfile.TemporaryDirectory(
@@ -813,17 +860,24 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                 saved, payload=payload, input_path=primary, stem=ensemble_stem,
                 output_dir=task_output_dir, temporary_dir=graph_output_dir, started_at=started_at,
             )
-    saved_paths = [str(path).strip() for path in saved if path is not None and str(path).strip()]
-    output_stems: list[str] = []
-    if fmt == "yaml" and len(simple_output_metadata) == len(saved_paths):
-        saved_paths = _finalize_simple_output_paths(saved_paths, simple_output_metadata, task_output_dir)
-        output_stems = [item["stem"] for item in simple_output_metadata]
+        original_saved_paths = [str(path).strip() for path in saved if path is not None and str(path).strip()]
+        records = getattr(saved, "records", None) or []
+        record_map = {Path(r.path).resolve(): r for r in records if getattr(r, "path", None)}
+        output_records = [record_map.get(Path(path).resolve()) for path in original_saved_paths]
+        saved_paths = original_saved_paths
+        if fmt == "yaml" and simple_definition is not None:
+            saved_paths = _finalize_simple_output_paths(
+                original_saved_paths,
+                simple_output_metadata,
+                task_output_dir,
+                source_root=graph_output_dir,
+            )
 
-    records = getattr(saved, "records", None) or []
-    record_map = {Path(r.path).resolve(): r for r in records if getattr(r, "path", None)}
+    output_stems = [item["stem"] for item in simple_output_metadata] \
+        if len(simple_output_metadata) == len(saved_paths) else []
     outputs: list[dict[str, Any]] = []
     for index, path in enumerate(saved_paths):
-        rec = record_map.get(Path(path).resolve())
+        rec = output_records[index] if index < len(output_records) else None
         stem = output_stems[index] if index < len(output_stems) else ""
         if not stem and rec and rec.stem:
             stem = rec.stem

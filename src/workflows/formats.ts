@@ -88,18 +88,44 @@ export function hasInvalidSimpleStructure(definition: Record<string, unknown>): 
       .forEach(stem => stepOutputIndexes.set(`${stepId}.${String(stem).trim()}`.toLowerCase(), index))
   })
   const availableEnsembleInputs = new Set(['input', ...stepOutputIndexes.keys()])
-  if (ensembles.some((value) => {
+  for (const value of ensembles) {
     if (!isRecord(value) || !Array.isArray(value.inputs)) return true
     const sources = value.inputs.map(input => isRecord(input) && typeof input.source === 'string'
       ? input.source.trim().toLowerCase()
       : '')
-    return sources.some(source => !availableEnsembleInputs.has(source)) || new Set(sources).size !== sources.length
-  })) return true
+    if (sources.some(source => !availableEnsembleInputs.has(source)) || new Set(sources).size !== sources.length) return true
+    availableEnsembleInputs.add(`${String(value.id).trim()}.${String(value.output_stem).trim()}`.toLowerCase())
+  }
   const ensembleOutputs = new Map(ensembles.flatMap(value => (
     isRecord(value) && typeof value.id === 'string' && typeof value.output_stem === 'string'
       ? [[`${value.id.trim()}.${value.output_stem.trim()}`.toLowerCase(), value] as const]
       : []
   )))
+  function collectEnsembleStepDependencies(
+    ensemble: Record<string, unknown>,
+    visiting = new Set<string>(),
+  ): number[] | null {
+    const ensembleId = String(ensemble.id || '').trim().toLowerCase()
+    if (!ensembleId || visiting.has(ensembleId) || !Array.isArray(ensemble.inputs)) return null
+    const nextVisiting = new Set(visiting).add(ensembleId)
+    const dependencies: number[] = []
+    for (const input of ensemble.inputs) {
+      if (!isRecord(input) || typeof input.source !== 'string') return null
+      const source = input.source.trim().toLowerCase()
+      if (source === 'input') continue
+      const stepIndex = stepOutputIndexes.get(source)
+      if (stepIndex !== undefined) {
+        dependencies.push(stepIndex)
+        continue
+      }
+      const nested = ensembleOutputs.get(source)
+      if (!nested) return null
+      const nestedDependencies = collectEnsembleStepDependencies(nested, nextVisiting)
+      if (!nestedDependencies) return null
+      dependencies.push(...nestedDependencies)
+    }
+    return dependencies
+  }
   if ((definition.steps as unknown[]).some((value, targetIndex) => {
     if (!isRecord(value)) return true
     if (value.input != null && typeof value.input !== 'string') return true
@@ -108,15 +134,60 @@ export function hasInvalidSimpleStructure(definition: Record<string, unknown>): 
     const sourceIndex = stepOutputIndexes.get(input)
     if (sourceIndex !== undefined) return sourceIndex >= targetIndex
     const ensemble = ensembleOutputs.get(input)
-    if (!ensemble || !Array.isArray(ensemble.inputs)) return true
-    return ensemble.inputs.some((ensembleInput) => {
-      if (!isRecord(ensembleInput) || typeof ensembleInput.source !== 'string') return true
-      const dependency = ensembleInput.source.trim().toLowerCase()
-      if (dependency === 'input') return false
-      const dependencyIndex = stepOutputIndexes.get(dependency)
-      return dependencyIndex === undefined || dependencyIndex >= targetIndex
-    })
+    if (!ensemble) return true
+    const dependencies = collectEnsembleStepDependencies(ensemble)
+    return !dependencies || dependencies.some(dependencyIndex => dependencyIndex >= targetIndex)
   })) return true
+
+  const outputNodeKeys = new Map<string, string>()
+  ;(definition.steps as unknown[]).forEach((value) => {
+    if (!isRecord(value) || typeof value.id !== 'string' || !Array.isArray(value.stems)) return
+    const stepId = value.id.trim()
+    value.stems.forEach((stem) => {
+      if (typeof stem === 'string' && stem.trim()) {
+        outputNodeKeys.set(`${stepId}.${stem.trim()}`.toLowerCase(), `step:${stepId.toLowerCase()}`)
+      }
+    })
+  })
+  ensembles.forEach((value) => {
+    if (!isRecord(value)) return
+    const output = `${String(value.id || '').trim()}.${String(value.output_stem || '').trim()}`.toLowerCase()
+    outputNodeKeys.set(output, `ensemble:${String(value.id || '').trim().toLowerCase()}`)
+  })
+  const edges = new Map<string, Set<string>>()
+  const addEdge = (source: string, target: string) => {
+    if (!source || source === 'input') return
+    const sourceNode = outputNodeKeys.get(source)
+    if (!sourceNode) return
+    const targets = edges.get(sourceNode) || new Set<string>()
+    targets.add(target)
+    edges.set(sourceNode, targets)
+  }
+  ;(definition.steps as unknown[]).forEach((value) => {
+    if (!isRecord(value) || typeof value.id !== 'string') return
+    const input = typeof value.input === 'string' ? value.input.trim().toLowerCase() : 'input'
+    addEdge(input, `step:${value.id.trim().toLowerCase()}`)
+  })
+  ensembles.forEach((value) => {
+    if (!isRecord(value) || !Array.isArray(value.inputs)) return
+    value.inputs.forEach((input) => {
+      if (isRecord(input) && typeof input.source === 'string') {
+        addEdge(input.source.trim().toLowerCase(), `ensemble:${String(value.id).trim().toLowerCase()}`)
+      }
+    })
+  })
+  const visitingNodes = new Set<string>()
+  const visitedNodes = new Set<string>()
+  const hasCycleFrom = (node: string): boolean => {
+    if (visitingNodes.has(node)) return true
+    if (visitedNodes.has(node)) return false
+    visitingNodes.add(node)
+    if ([...(edges.get(node) || [])].some(hasCycleFrom)) return true
+    visitingNodes.delete(node)
+    visitedNodes.add(node)
+    return false
+  }
+  if ([...outputNodeKeys.values()].some(hasCycleFrom)) return true
   const ids = [
     ...(definition.steps as unknown[]).flatMap(value => isRecord(value) && typeof value.id === 'string' ? [value.id.trim()] : []),
     ...ensembles.flatMap(value => isRecord(value) && typeof value.id === 'string' ? [value.id.trim()] : []),

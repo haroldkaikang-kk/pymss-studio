@@ -16,6 +16,11 @@ export type SimpleConnectionCheck =
   | { ok: true }
   | { ok: false; reason: 'missing-source' | 'missing-target' | 'invalid-source' | 'forward-link' | 'self-link' | 'duplicate-source' | 'invalid-save-target' }
 
+export type SimpleDestructiveImpact = {
+  connections: number
+  savedOutputs: number
+}
+
 export function simpleStepInputTarget(stepId: string): `step:${string}` {
   return `step:${stepId}`
 }
@@ -42,20 +47,82 @@ export function simpleSourceStem(source: string): string {
   return separator > 0 ? source.slice(separator + 1) : ''
 }
 
+function countSourceReferences(draft: SimpleDraft, sources: Set<string>): number {
+  if (!sources.size) return 0
+  const matches = (source: string) => sources.has(source.trim().toLowerCase())
+  return draft.steps.filter(step => matches(step.input)).length
+    + draft.ensembles.reduce(
+      (total, ensemble) => total + ensemble.inputs.filter(input => matches(input.source)).length,
+      0,
+    )
+}
+
+/** Describe collateral edits before a model change removes output stems. */
+export function analyzeSimpleModelChangeImpact(
+  draft: SimpleDraft,
+  stepId: string,
+  nextStems: string[],
+): SimpleDestructiveImpact {
+  const step = draft.steps.find(item => item.id === stepId)
+  if (!step) return { connections: 0, savedOutputs: 0 }
+  const retained = new Set(nextStems.map(stem => stem.trim().toLowerCase()))
+  const removedStems = step.stems.filter(stem => !retained.has(stem.trim().toLowerCase()))
+  const sources = new Set(removedStems.map(stem => simpleOutputRef(step.id, stem).toLowerCase()))
+  const removed = new Set(removedStems.map(stem => stem.trim().toLowerCase()))
+  return {
+    connections: countSourceReferences(draft, sources),
+    savedOutputs: Object.keys(step.save || {}).filter(stem => removed.has(stem.trim().toLowerCase())).length,
+  }
+}
+
+/** Describe downstream links and selected outputs removed with a node. */
+export function analyzeSimpleNodeRemovalImpact(
+  draft: SimpleDraft,
+  nodeId: string,
+): SimpleDestructiveImpact {
+  const step = draft.steps.find(item => item.id === nodeId)
+  if (step) {
+    const sources = new Set(step.stems.map(stem => simpleOutputRef(step.id, stem).toLowerCase()))
+    return {
+      connections: countSourceReferences(draft, sources),
+      savedOutputs: Object.keys(step.save || {}).length,
+    }
+  }
+  const ensemble = draft.ensembles.find(item => item.id === nodeId)
+  if (!ensemble) return { connections: 0, savedOutputs: 0 }
+  const stem = ensemble.outputStem.trim()
+  const sources = new Set(stem ? [simpleOutputRef(ensemble.id, stem).toLowerCase()] : [])
+  return {
+    connections: countSourceReferences(draft, sources),
+    savedOutputs: ensemble.save ? 1 : 0,
+  }
+}
+
 export function updateSimpleEnsembleOutputStem(
   draft: SimpleDraft,
   ensemble: SimpleEnsembleDraft,
   value: string,
 ): void {
+  const previousStem = ensemble.outputStem.trim()
   const nextStem = value.trim()
   ensemble.outputStem = value
   if (!nextStem) return
 
+  const previousSource = previousStem ? simpleOutputRef(ensemble.id, previousStem) : ''
   const nextSource = simpleOutputRef(ensemble.id, nextStem)
+  const referencesPreviousOutput = (source: string) => previousSource
+    ? source.trim().toLowerCase() === previousSource.toLowerCase()
+    : simpleSourceStepId(source.trim()).toLowerCase() === ensemble.id.toLowerCase()
   draft.steps.forEach((step) => {
-    if (simpleSourceStepId(step.input).toLowerCase() === ensemble.id.toLowerCase()) {
+    if (referencesPreviousOutput(step.input)) {
       step.input = nextSource
     }
+  })
+  draft.ensembles.forEach((target) => {
+    if (target.id === ensemble.id) return
+    target.inputs = target.inputs.map(input => referencesPreviousOutput(input.source)
+      ? { ...input, source: nextSource }
+      : input)
   })
 }
 
@@ -64,28 +131,109 @@ type ResolvedSimpleSource =
   | { kind: 'ensemble'; ensemble: SimpleEnsembleDraft; stem: string }
 
 function resolveSource(draft: SimpleDraft, source: string): ResolvedSimpleSource | null {
-  if (source === 'input') return null
+  if (source.trim().toLowerCase() === 'input') return null
   const sourceId = simpleSourceStepId(source)
   const stem = simpleSourceStem(source)
-  const step = draft.steps.find(item => item.id === sourceId)
-  if (step && stem && step.stems.some(item => item.toLowerCase() === stem.toLowerCase())) {
-    return { kind: 'step', step, stem }
+  const sourceIdKey = sourceId.toLowerCase()
+  const step = draft.steps.find(item => item.id.toLowerCase() === sourceIdKey)
+  const stepStem = step?.stems.find(item => item.toLowerCase() === stem.toLowerCase())
+  if (step && stepStem) {
+    return { kind: 'step', step, stem: stepStem }
   }
-  const ensemble = draft.ensembles.find(item => item.id === sourceId)
+  const ensemble = draft.ensembles.find(item => item.id.toLowerCase() === sourceIdKey)
   if (ensemble && stem && ensemble.outputStem.trim().toLowerCase() === stem.toLowerCase()) {
     return { kind: 'ensemble', ensemble, stem: ensemble.outputStem.trim() }
   }
   return null
 }
 
+function normalizeSimpleSource(draft: SimpleDraft, source: string): string {
+  const trimmed = source.trim()
+  if (trimmed.toLowerCase() === 'input') return 'input'
+  const resolved = resolveSource(draft, trimmed)
+  if (resolved?.kind === 'step') return simpleOutputRef(resolved.step.id, resolved.stem)
+  if (resolved?.kind === 'ensemble') return simpleOutputRef(resolved.ensemble.id, resolved.stem)
+  return trimmed
+}
+
 function ensembleTarget(draft: SimpleDraft, target: string) {
   const match = /^ensemble:(.+):(\d+)$/.exec(target)
   if (!match) return null
-  const ensemble = draft.ensembles.find(item => item.id === match[1])
+  const ensembleIndex = draft.ensembles.findIndex(item => item.id === match[1])
+  const ensemble = draft.ensembles[ensembleIndex]
   const index = Number(match[2])
   return ensemble && Number.isInteger(index) && index >= 0 && index < ensemble.inputs.length
-    ? { ensemble, index }
+    ? { ensemble, ensembleIndex, index }
     : null
+}
+
+function ensembleStepDependencies(
+  draft: SimpleDraft,
+  ensemble: SimpleEnsembleDraft,
+  visiting = new Set<string>(),
+): SimpleStepDraft[] | null {
+  const key = ensemble.id.toLowerCase()
+  if (visiting.has(key)) return null
+  const nextVisiting = new Set(visiting).add(key)
+  const dependencies: SimpleStepDraft[] = []
+  for (const input of ensemble.inputs) {
+    if (input.source.trim().toLowerCase() === 'input') continue
+    const source = resolveSource(draft, input.source.trim())
+    if (!source) return null
+    if (source.kind === 'step') {
+      dependencies.push(source.step)
+      continue
+    }
+    const nested = ensembleStepDependencies(draft, source.ensemble, nextVisiting)
+    if (!nested) return null
+    dependencies.push(...nested)
+  }
+  return dependencies
+}
+
+function simpleNodeKeyForSource(draft: SimpleDraft, source: string): string | null {
+  const resolved = resolveSource(draft, source.trim())
+  return resolved ? `${resolved.kind}:${resolved.kind === 'step' ? resolved.step.id : resolved.ensemble.id}` : null
+}
+
+function wouldCreateSimpleCycle(
+  draft: SimpleDraft,
+  source: string,
+  targetKey: string,
+  replacedTarget: SimpleConnectionTarget,
+): boolean {
+  const sourceKey = simpleNodeKeyForSource(draft, source)
+  if (!sourceKey) return false
+  if (sourceKey.toLowerCase() === targetKey.toLowerCase()) return true
+  const edges = new Map<string, Set<string>>()
+  const addEdge = (input: string, target: string) => {
+    if (!input.trim() || input.trim() === 'input') return
+    const inputKey = simpleNodeKeyForSource(draft, input)
+    if (!inputKey) return
+    const targets = edges.get(inputKey) || new Set<string>()
+    targets.add(target)
+    edges.set(inputKey, targets)
+  }
+  draft.steps.forEach((step) => {
+    if (replacedTarget === simpleStepInputTarget(step.id)) return
+    addEdge(step.input, `step:${step.id}`)
+  })
+  draft.ensembles.forEach((ensemble) => {
+    ensemble.inputs.forEach((input, index) => {
+      if (replacedTarget === simpleEnsembleInputTarget(ensemble.id, index)) return
+      addEdge(input.source, `ensemble:${ensemble.id}`)
+    })
+  })
+  const pending = [targetKey]
+  const visited = new Set<string>()
+  while (pending.length) {
+    const current = pending.pop()!
+    if (current.toLowerCase() === sourceKey.toLowerCase()) return true
+    if (visited.has(current)) continue
+    visited.add(current)
+    pending.push(...(edges.get(current) || []))
+  }
+  return false
 }
 
 export function canConnectSimple(
@@ -95,58 +243,96 @@ export function canConnectSimple(
 ): SimpleConnectionCheck {
   const rawSource = source.trim()
   if (!rawSource) return { ok: false, reason: 'missing-source' }
-  const sourceValue = rawSource === 'input' ? null : resolveSource(draft, rawSource)
-  if (rawSource !== 'input' && !sourceValue) return { ok: false, reason: 'invalid-source' }
+  const normalizedSource = normalizeSimpleSource(draft, rawSource)
+  const isInputSource = normalizedSource === 'input'
+  const sourceValue = isInputSource ? null : resolveSource(draft, normalizedSource)
+  if (!isInputSource && !sourceValue) return { ok: false, reason: 'invalid-source' }
 
   if (target === 'step:') return { ok: false, reason: 'missing-target' }
   if (target.startsWith('step:')) {
     const targetId = target.slice('step:'.length)
     const targetIndex = draft.steps.findIndex(step => step.id === targetId)
     if (targetIndex < 0) return { ok: false, reason: 'missing-target' }
-    if (rawSource === 'input') return { ok: true }
+    if (isInputSource) return { ok: true }
     if (sourceValue?.kind === 'ensemble') {
-      for (const input of sourceValue.ensemble.inputs) {
-        const dependency = input.source.trim()
-        if (dependency === 'input') continue
-        const resolvedDependency = resolveSource(draft, dependency)
-        if (resolvedDependency?.kind !== 'step') return { ok: false, reason: 'invalid-source' }
-        const dependencyIndex = draft.steps.findIndex(step => step.id === resolvedDependency.step.id)
+      const dependencies = ensembleStepDependencies(draft, sourceValue.ensemble)
+      if (!dependencies) return { ok: false, reason: 'invalid-source' }
+      for (const dependency of dependencies) {
+        const dependencyIndex = draft.steps.findIndex(step => step.id === dependency.id)
         if (dependencyIndex < 0) return { ok: false, reason: 'invalid-source' }
         if (dependencyIndex >= targetIndex) return { ok: false, reason: 'forward-link' }
       }
+      if (wouldCreateSimpleCycle(draft, normalizedSource, `step:${targetId}`, target)) return { ok: false, reason: 'forward-link' }
       return { ok: true }
     }
     if (sourceValue?.kind !== 'step') return { ok: false, reason: 'invalid-source' }
-    const sourceId = simpleSourceStepId(rawSource)
+    const sourceId = sourceValue.step.id
     const sourceIndex = draft.steps.findIndex(step => step.id === sourceId)
     if (sourceIndex < 0) return { ok: false, reason: 'invalid-source' }
-    if (sourceId === targetId) return { ok: false, reason: 'self-link' }
+    if (sourceId.toLowerCase() === targetId.toLowerCase()) return { ok: false, reason: 'self-link' }
     if (sourceIndex >= targetIndex) return { ok: false, reason: 'forward-link' }
+    if (wouldCreateSimpleCycle(draft, normalizedSource, `step:${targetId}`, target)) return { ok: false, reason: 'forward-link' }
     return { ok: true }
   }
 
   if (target.startsWith('ensemble:')) {
     const resolvedTarget = ensembleTarget(draft, target)
     if (!resolvedTarget) return { ok: false, reason: 'missing-target' }
-    if (rawSource !== 'input' && sourceValue?.kind !== 'step') return { ok: false, reason: 'invalid-source' }
-    if (resolvedTarget.ensemble.inputs.some((input, index) => index !== resolvedTarget.index && input.source.toLowerCase() === rawSource.toLowerCase())) {
+    if (!isInputSource) {
+      if (!sourceValue) return { ok: false, reason: 'invalid-source' }
+      if (sourceValue.kind === 'ensemble') {
+        const sourceIndex = draft.ensembles.findIndex(item => item.id === sourceValue.ensemble.id)
+        if (sourceIndex === resolvedTarget.ensembleIndex) return { ok: false, reason: 'self-link' }
+        if (sourceIndex < 0 || sourceIndex >= resolvedTarget.ensembleIndex) return { ok: false, reason: 'forward-link' }
+      }
+      if (wouldCreateSimpleCycle(
+        draft,
+        normalizedSource,
+        `ensemble:${resolvedTarget.ensemble.id}`,
+        target,
+      )) return { ok: false, reason: 'forward-link' }
+    }
+    if (resolvedTarget.ensemble.inputs.some((input, index) => index !== resolvedTarget.index && normalizeSimpleSource(draft, input.source).toLowerCase() === normalizedSource.toLowerCase())) {
       return { ok: false, reason: 'duplicate-source' }
     }
     return { ok: true }
   }
 
   if (target === 'save') {
-    if (rawSource === 'input') return { ok: false, reason: 'invalid-save-target' }
+    if (isInputSource) return { ok: false, reason: 'invalid-save-target' }
     if (!sourceValue) return { ok: false, reason: 'invalid-save-target' }
     return { ok: true }
   }
   if (!target.startsWith('save:')) return { ok: false, reason: 'missing-target' }
-  if (rawSource === 'input') return { ok: false, reason: 'invalid-save-target' }
+  if (isInputSource) return { ok: false, reason: 'invalid-save-target' }
   const value = target.slice('save:'.length)
-  if (!sourceValue || value.toLowerCase() !== rawSource.toLowerCase()) {
+  if (!sourceValue || value.toLowerCase() !== normalizedSource.toLowerCase()) {
     return { ok: false, reason: 'invalid-save-target' }
   }
   return { ok: true }
+}
+
+export function canMoveSimpleStep(draft: SimpleDraft, stepId: string, offset: -1 | 1): boolean {
+  const index = draft.steps.findIndex(step => step.id === stepId)
+  const targetIndex = index + offset
+  if (index < 0 || targetIndex < 0 || targetIndex >= draft.steps.length) return false
+  const steps = [...draft.steps]
+  ;[steps[index], steps[targetIndex]] = [steps[targetIndex], steps[index]]
+  const candidate = { ...draft, steps }
+  return steps.every((step) => (
+    !step.input.trim()
+    || canConnectSimple(candidate, step.input, simpleStepInputTarget(step.id)).ok
+  ))
+}
+
+export function moveSimpleStep(draft: SimpleDraft, stepId: string, offset: -1 | 1): boolean {
+  if (!canMoveSimpleStep(draft, stepId, offset)) return false
+  const index = draft.steps.findIndex(step => step.id === stepId)
+  const targetIndex = index + offset
+  const steps = [...draft.steps]
+  ;[steps[index], steps[targetIndex]] = [steps[targetIndex], steps[index]]
+  draft.steps = steps
+  return true
 }
 
 export function connectSimple(
@@ -156,17 +342,18 @@ export function connectSimple(
 ): SimpleConnectionCheck {
   const check = canConnectSimple(draft, source, target)
   if (!check.ok) return check
+  const normalizedSource = normalizeSimpleSource(draft, source)
   if (target.startsWith('step:')) {
     const step = draft.steps.find(item => item.id === target.slice('step:'.length))
-    if (step) step.input = source.trim()
+    if (step) step.input = normalizedSource
     return check
   }
   if (target.startsWith('ensemble:')) {
     const resolvedTarget = ensembleTarget(draft, target)
-    if (resolvedTarget) resolvedTarget.ensemble.inputs[resolvedTarget.index].source = source.trim()
+    if (resolvedTarget) resolvedTarget.ensemble.inputs[resolvedTarget.index].source = normalizedSource
     return check
   }
-  const value = target === 'save' ? source.trim() : target.slice('save:'.length)
+  const value = target === 'save' ? normalizedSource : target.slice('save:'.length)
   const sourceId = simpleSourceStepId(value)
   const stem = simpleSourceStem(value)
   const step = draft.steps.find(item => item.id === sourceId)
@@ -215,7 +402,7 @@ export function disconnectSimple(draft: SimpleDraft, target: SimpleConnectionTar
 
 export function cleanupSimpleDraft(draft: SimpleDraft): void {
   if (!Array.isArray(draft.ensembles)) draft.ensembles = []
-  draft.ensembles.forEach((ensemble) => {
+  draft.ensembles.forEach((ensemble, ensembleIndex) => {
     if (!SIMPLE_ENSEMBLE_ALGORITHMS.includes(ensemble.algorithm)) ensemble.algorithm = 'avg_wave'
     ensemble.outputStem = ensemble.outputStem.trim()
     ensemble.outputName = ensemble.outputName.trim() || '%filename%_%stem%_Ensemble'
@@ -223,19 +410,26 @@ export function cleanupSimpleDraft(draft: SimpleDraft): void {
     ensemble.inputs = ensemble.inputs.slice(0, 10).map((input) => {
       const source = input.source.trim()
       const resolved = resolveSource(draft, source)
-      const sourceKey = source.toLowerCase()
-      const validSource = source === 'input' || resolved?.kind === 'step'
+      const normalizedSource = normalizeSimpleSource(draft, source)
+      const sourceKey = normalizedSource.toLowerCase()
+      const sourceEnsembleIndex = resolved?.kind === 'ensemble'
+        ? draft.ensembles.findIndex(item => item.id === resolved.ensemble.id)
+        : -1
+      const validSource = normalizedSource === 'input'
+        || resolved?.kind === 'step'
+        || (resolved?.kind === 'ensemble' && sourceEnsembleIndex >= 0 && sourceEnsembleIndex < ensembleIndex)
       const valid = validSource && !seen.has(sourceKey)
       if (valid) seen.add(sourceKey)
       return {
-        source: valid ? source : '',
+        source: valid ? normalizedSource : '',
         weight: Number.isFinite(input.weight) && input.weight > 0 ? input.weight : 1,
       }
     })
     while (ensemble.inputs.length < 2) ensemble.inputs.push({ source: '', weight: 1 })
   })
   draft.steps.forEach((step) => {
-    const input = step.input.trim()
+    const input = normalizeSimpleSource(draft, step.input)
+    step.input = input
     const sourceId = simpleSourceStepId(input)
     const hasPendingEnsembleSource = draft.ensembles.some(ensemble => (
       !ensemble.outputStem
@@ -258,6 +452,7 @@ export function cleanupSimpleDraft(draft: SimpleDraft): void {
     step.stems.forEach((stem) => {
       const value = namesByStem.get(stem.toLowerCase())
       if (value?.trim()) nextNames[stem] = value
+      else if (Object.prototype.hasOwnProperty.call(nextSave, stem)) nextNames[stem] = '%filename%_%stem%_%model%'
     })
     step.outputNames = nextNames
   })

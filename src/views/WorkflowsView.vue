@@ -63,6 +63,14 @@ const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuVisible = ref(false)
 const contextWorkflow = ref<WorkflowEntry | null>(null)
+type WorkflowDefaultsPatch = {
+  defaultDevice?: string
+  defaultFormat?: string
+  defaultNormalize?: boolean
+}
+const updatingWorkflowDefaults = ref(false)
+const pendingWorkflowDefaults = new Map<string, WorkflowDefaultsPatch>()
+const workflowDefaultsQueue: string[] = []
 let unmounted = false
 
 const deviceOptions = [
@@ -277,48 +285,79 @@ function simpleReasonLabel(reason: SimpleWorkflowReasonCode) {
   return t(simpleReasonKeys[reason])
 }
 
-async function updateSelectedWorkflowDefaults(patch: {
-  defaultDevice?: string
-  defaultFormat?: string
-}) {
-  const current = selectedWorkflow.value
-  const draft = selectedDraft.value
-  if (!current || !draft || !selectedSimpleAnalysis.value?.editable || isNodeEditorOpen.value) return
-  const definition = JSON.parse(JSON.stringify(current.definition)) as Record<string, unknown>
-  const device = patch.defaultDevice ?? draft.defaultDevice
-  const fmt = patch.defaultFormat ?? draft.defaultFormat
-  const defaults = definition.defaults && typeof definition.defaults === 'object' && !Array.isArray(definition.defaults)
-    ? definition.defaults as Record<string, unknown>
-    : {}
-  defaults.device = device
-  defaults.output_format = fmt
-  const inference = (defaults.inference_params as Record<string, unknown>) || {}
-  inference.normalize = draft.defaultNormalize
-  defaults.inference_params = inference
-  definition.defaults = defaults
+async function flushWorkflowDefaultsQueue() {
+  if (updatingWorkflowDefaults.value) return
+  updatingWorkflowDefaults.value = true
   try {
-    const entry = await workflow.saveWorkflow({
-      id: current.id,
-      name: current.name,
-      description: current.description,
-      definition,
-      expectedUpdatedAt: current.updatedAt,
-    })
-    // The selected workflow may change while persistence is in flight. Do
-    // not overwrite the newly selected editor fields with the old entry.
-    if (selectedWorkflowId.value !== current.id) return
-    editWorkflow(entry)
-  } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error))
+    while (workflowDefaultsQueue.length) {
+      const workflowId = workflowDefaultsQueue[0]
+      const patch = pendingWorkflowDefaults.get(workflowId)
+      pendingWorkflowDefaults.delete(workflowId)
+      if (!patch) {
+        workflowDefaultsQueue.shift()
+        continue
+      }
+      const current = workflows.value.find(item => item.id === workflowId)
+      const analysis = current ? analyzeSimpleWorkflow(current.definition) : null
+      if (!current || !analysis?.editable) {
+        workflowDefaultsQueue.shift()
+        continue
+      }
+      const draft = hydrateSimpleWorkflow(current.definition)
+      const definition = JSON.parse(JSON.stringify(current.definition)) as Record<string, unknown>
+      const defaults = definition.defaults && typeof definition.defaults === 'object' && !Array.isArray(definition.defaults)
+        ? definition.defaults as Record<string, unknown>
+        : {}
+      defaults.device = patch.defaultDevice ?? draft.defaultDevice
+      defaults.output_format = patch.defaultFormat ?? draft.defaultFormat
+      const inference = (defaults.inference_params as Record<string, unknown>) || {}
+      inference.normalize = patch.defaultNormalize ?? draft.defaultNormalize
+      defaults.inference_params = inference
+      definition.defaults = defaults
+      try {
+        const entry = await workflow.saveWorkflow({
+          id: current.id,
+          name: current.name,
+          description: current.description,
+          definition,
+          expectedUpdatedAt: current.updatedAt,
+        })
+        // The selected workflow may change while persistence is in flight. Do
+        // not overwrite the newly selected editor fields with the old entry.
+        if (selectedWorkflowId.value === current.id) editWorkflow(entry)
+      } catch (error) {
+        pendingWorkflowDefaults.delete(workflowId)
+        workflowDefaultsQueue.shift()
+        message.error(error instanceof Error ? error.message : String(error))
+        continue
+      }
+      if (!pendingWorkflowDefaults.has(workflowId)) workflowDefaultsQueue.shift()
+    }
+  } finally {
+    updatingWorkflowDefaults.value = false
+    if (workflowDefaultsQueue.length) void flushWorkflowDefaultsQueue()
   }
 }
 
+function updateSelectedWorkflowDefaults(patch: WorkflowDefaultsPatch) {
+  const current = selectedWorkflow.value
+  if (!current || !selectedDraft.value || !selectedSimpleAnalysis.value?.editable || isNodeEditorOpen.value) return
+  const pending = pendingWorkflowDefaults.get(current.id)
+  if (!pending) workflowDefaultsQueue.push(current.id)
+  pendingWorkflowDefaults.set(current.id, { ...pending, ...patch })
+  void flushWorkflowDefaultsQueue()
+}
+
 function updateSelectedDefaultDevice(value: string | number | null) {
-  void updateSelectedWorkflowDefaults({ defaultDevice: String(value || 'auto') })
+  updateSelectedWorkflowDefaults({ defaultDevice: String(value || 'auto') })
 }
 
 function updateSelectedDefaultFormat(value: string | number | null) {
-  void updateSelectedWorkflowDefaults({ defaultFormat: String(value || 'wav') })
+  updateSelectedWorkflowDefaults({ defaultFormat: String(value || 'wav') })
+}
+
+function updateSelectedDefaultNormalize(value: boolean) {
+  updateSelectedWorkflowDefaults({ defaultNormalize: value })
 }
 
 
@@ -911,7 +950,8 @@ watch([workflows, selectedWorkflowId], () => {
                     :value="selectedDraft.defaultDevice"
                     size="small"
                     :options="deviceOptions"
-                    :disabled="isNodeEditorOpen"
+                    :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
+                    :loading="updatingWorkflowDefaults"
                     @update:value="updateSelectedDefaultDevice"
                   />
                 </div>
@@ -921,8 +961,19 @@ watch([workflows, selectedWorkflowId], () => {
                     :value="selectedDraft.defaultFormat"
                     size="small"
                     :options="formatOptions"
-                    :disabled="isNodeEditorOpen"
+                    :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
+                    :loading="updatingWorkflowDefaults"
                     @update:value="updateSelectedDefaultFormat"
+                  />
+                </div>
+                <div class="wf-param">
+                  <span>{{ t('workflows.defaultNormalize') }}</span>
+                  <n-switch
+                    :value="selectedDraft.defaultNormalize"
+                    size="small"
+                    :disabled="isNodeEditorOpen || updatingWorkflowDefaults"
+                    :loading="updatingWorkflowDefaults"
+                    @update:value="updateSelectedDefaultNormalize"
                   />
                 </div>
               </div>
