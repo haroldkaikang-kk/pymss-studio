@@ -260,17 +260,146 @@ function stemOutputNames(stem: string) {
   return [`${stem} (Audio)`, `${stem} (String)`]
 }
 
+function outputIdentity(name: unknown) {
+  const match = /^(.*) \((Audio|String)\)$/.exec(String(name || '').trim())
+  if (!match) return null
+  return {
+    stem: match[1].trim(),
+    kind: match[2].toLowerCase(),
+  }
+}
+
+function graphLink(graph: any, linkId: unknown) {
+  if (!graph || linkId == null) return null
+  if (graph.links instanceof Map) return graph.links.get(linkId) || null
+  if (graph._links instanceof Map) return graph._links.get(linkId) || null
+  return graph.links?.[linkId as any] || graph._links?.[linkId as any] || null
+}
+
+type RerouteSnapshot = {
+  id: unknown
+  parentId: unknown
+  pos: [number, number]
+  floating: unknown
+}
+
+function captureRerouteChain(graph: any, parentId: unknown, snapshots: Map<unknown, RerouteSnapshot>) {
+  const visited = new Set<unknown>()
+  let currentId: unknown = parentId
+  while (currentId != null && !visited.has(currentId)) {
+    visited.add(currentId)
+    const reroute = graph?.getReroute?.(currentId) || graph?.reroutes?.get?.(currentId)
+    if (!reroute) break
+    snapshots.set(currentId, {
+      id: currentId,
+      parentId: reroute.parentId,
+      pos: [Number(reroute.pos?.[0] || 0), Number(reroute.pos?.[1] || 0)],
+      floating: reroute.floating,
+    })
+    currentId = reroute.parentId
+  }
+}
+
+function restoreRerouteChain(graph: any, parentId: unknown, snapshots: Map<unknown, RerouteSnapshot>) {
+  if (parentId == null || !graph?.setReroute) return undefined
+  const chain: RerouteSnapshot[] = []
+  const visited = new Set<unknown>()
+  let currentId: unknown = parentId
+  while (currentId != null && !visited.has(currentId)) {
+    visited.add(currentId)
+    const snapshot = snapshots.get(currentId)
+    if (!snapshot) break
+    chain.push(snapshot)
+    currentId = snapshot.parentId
+  }
+  for (const snapshot of chain.reverse()) {
+    if (graph.getReroute?.(snapshot.id) || graph.reroutes?.get?.(snapshot.id)) continue
+    graph.setReroute({
+      id: snapshot.id,
+      parentId: snapshot.parentId,
+      pos: snapshot.pos,
+      linkIds: [],
+      floating: snapshot.floating,
+    })
+  }
+  return graph.getReroute?.(parentId) || graph.reroutes?.get?.(parentId)
+    ? parentId
+    : undefined
+}
+
 /**
  * Apply the dynamic stem outputs to a separate node (idempotent).
  * Called by the editor after the user picks a model whose stems are known.
  */
 export function setSeparateStems(node: LGraphNodeType, stems: string[]) {
   const n = node as AnyNode
-  while (n.outputs && n.outputs.length) n.removeOutput(0)
   const list = stems.length ? stems : DEFAULT_STEMS
+  const desiredNames = list.flatMap(stemOutputNames)
+  const currentNames = ((n.outputs || []) as Array<{ name?: unknown }>).map(output => String(output.name || ''))
+  if (
+    currentNames.length === desiredNames.length
+    && currentNames.every((name: string, index: number) => name === desiredNames[index])
+  ) {
+    n.stems = list
+    n.setSize([Math.max(n.size[0], SEPARATE_NODE_MIN_WIDTH), n.computeSize()[1]])
+    localizePymssNode(n)
+    return
+  }
+
+  const preservedLinks: Array<{
+    stem: string
+    kind: string
+    placeholderIndex: number | null
+    targetNode: AnyNode
+    targetSlot: number
+    parentRerouteId: unknown
+  }> = []
+  const graph = n.graph as any
+  const rerouteSnapshots = new Map<unknown, RerouteSnapshot>()
+  for (const output of n.outputs || []) {
+    const identity = outputIdentity(output.name)
+    if (!identity) continue
+    const placeholder = /^stem_(\d+)$/i.exec(identity.stem)
+    for (const linkId of output.links || []) {
+      const link = graphLink(graph, linkId)
+      const targetNode = link ? graph?.getNodeById?.(link.target_id) as AnyNode | undefined : undefined
+      if (!link || !targetNode) continue
+      captureRerouteChain(graph, link.parentId, rerouteSnapshots)
+      preservedLinks.push({
+        stem: identity.stem.toLowerCase(),
+        kind: identity.kind,
+        placeholderIndex: placeholder ? Math.max(0, Number(placeholder[1]) - 1) : null,
+        targetNode,
+        targetSlot: Number(link.target_slot),
+        parentRerouteId: link.parentId,
+      })
+    }
+  }
+
+  while (n.outputs && n.outputs.length) n.removeOutput(0)
   for (const stem of list) {
     for (const name of stemOutputNames(stem)) {
-      n.addOutput(name, PORT.AUDIO === name ? PORT.AUDIO : (name.endsWith('(String)') ? PORT.STRING : PORT.AUDIO))
+      n.addOutput(name, name.endsWith('(String)') ? PORT.STRING : PORT.AUDIO)
+    }
+  }
+
+  const outputSlots = new Map<string, number>()
+  for (const [index, output] of (n.outputs || []).entries()) {
+    const identity = outputIdentity(output.name)
+    if (identity) outputSlots.set(`${identity.stem.toLowerCase()}\0${identity.kind}`, index)
+  }
+  for (const link of preservedLinks) {
+    const fallbackSlot = link.placeholderIndex === null
+      ? undefined
+      : link.placeholderIndex * 2 + (link.kind === 'string' ? 1 : 0)
+    const outputSlot = outputSlots.get(`${link.stem}\0${link.kind}`) ?? fallbackSlot
+    if (outputSlot === undefined || outputSlot < 0 || outputSlot >= (n.outputs?.length || 0)) continue
+    try {
+      const parentRerouteId = restoreRerouteChain(graph, link.parentRerouteId, rerouteSnapshots)
+      n.connect(outputSlot, link.targetNode, link.targetSlot, parentRerouteId)
+    } catch {
+      // LiteGraph rejects connections whose target disappeared during the
+      // same edit; incompatible links are intentionally left disconnected.
     }
   }
   n.stems = list

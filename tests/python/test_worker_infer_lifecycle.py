@@ -142,6 +142,99 @@ class InferenceLifecycleTests(unittest.TestCase):
         self.separator.close.assert_called_once_with()
 
 
+class BatchInferenceLifecycleTests(unittest.TestCase):
+    def test_missing_output_marks_the_batch_failed_without_stopping_later_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first.wav"
+            second = root / "second.wav"
+            first.touch()
+            second.touch()
+
+            class Separator:
+                def process_folder(self, path: str, _input_index: int = 1) -> list[str]:
+                    return [] if Path(path) == first else [path]
+
+                def studio_outputs(self) -> list[dict[str, str]]:
+                    return [{"path": str(root / "vocals.wav"), "stem": "vocals"}]
+
+                def close(self) -> None:
+                    pass
+
+            payload = {
+                "taskId": "batch",
+                "model": "model.pth",
+                "output": str(root / "outputs"),
+                "outputLayout": "flat",
+                "outputFormat": "wav",
+                "tasks": [
+                    {"taskId": "first-task", "input": str(first)},
+                    {"taskId": "second-task", "input": str(second)},
+                ],
+            }
+            emitted: list[tuple[str | None, str]] = []
+
+            def emit_error(*_args, **kwargs):
+                emitted.append((kwargs.get("task_id"), "error"))
+                return 1
+
+            with mock.patch.object(worker_infer, "_prepare_separator", return_value=Separator()), \
+                 mock.patch.object(worker_infer, "emit", side_effect=lambda kind, _value, task_id=None: emitted.append((task_id, kind))), \
+                 mock.patch.object(worker_infer, "emit_error", side_effect=emit_error):
+                self.assertEqual(worker_infer.cmd_infer_batch(payload), 1)
+
+            self.assertIn(("first-task", "error"), emitted)
+            self.assertIn(("second-task", "task_done"), emitted)
+
+    def test_later_failure_does_not_send_an_error_after_an_earlier_task_done(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first.wav"
+            second = root / "second.wav"
+            first.touch()
+            second.touch()
+
+            class Separator:
+                def process_folder(self, path: str, _input_index: int = 1) -> list[str]:
+                    if Path(path) == second:
+                        raise RuntimeError("second failed")
+                    return [path]
+
+                def studio_outputs(self) -> list[dict[str, str]]:
+                    return [{"path": str(root / "vocals.wav"), "stem": "vocals"}]
+
+                def close(self) -> None:
+                    pass
+
+            payload = {
+                "taskId": "batch",
+                "model": "model.pth",
+                "output": str(root / "outputs"),
+                "outputLayout": "flat",
+                "outputFormat": "wav",
+                "tasks": [
+                    {"taskId": "first-task", "input": str(first)},
+                    {"taskId": "second-task", "input": str(second)},
+                ],
+            }
+            emitted: list[tuple[str | None, str]] = []
+
+            def emit_error(*_args, **kwargs):
+                emitted.append((kwargs.get("task_id"), "error"))
+                return 1
+
+            with mock.patch.object(worker_infer, "_prepare_separator", return_value=Separator()), \
+                 mock.patch.object(worker_infer, "emit", side_effect=lambda kind, _value, task_id=None: emitted.append((task_id, kind))), \
+                 mock.patch.object(worker_infer, "emit_error", side_effect=emit_error):
+                self.assertEqual(worker_infer.cmd_infer_batch(payload), 1)
+
+            first_events = [kind for task_id, kind in emitted if task_id == "first-task"]
+            second_events = [kind for task_id, kind in emitted if task_id == "second-task"]
+            self.assertIn("task_done", first_events)
+            self.assertNotIn("error", first_events)
+            self.assertIn("error", second_events)
+
+
 class AudioParameterNormalizationTests(unittest.TestCase):
     def test_aac_is_forced_without_mutating_other_saved_audio_parameters(self) -> None:
         for codec in ["aac", " AAC ", "alac", "", None]:

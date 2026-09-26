@@ -11,6 +11,7 @@ if __package__:
 else:
     import _bootstrap as _worker_test_bootstrap
 
+import worker_workflows
 from worker_workflows import (
     _apply_simple_ensembles,
     _apply_simple_output_names,
@@ -21,6 +22,52 @@ from worker_workflows import (
     _simple_output_names,
     _workflow_output_stem,
 )
+
+
+class WorkflowTemporaryFileTests(unittest.TestCase):
+    def test_cleanup_keeps_the_shared_directory_available_for_parallel_writers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(worker_workflows.tempfile, "gettempdir", return_value=temporary):
+                payload = {"workflow": {"nodes": []}}
+                path, _format = worker_workflows._write_workflow_file(payload, "cleanup-shared-dir")
+                worker_workflows._cleanup_workflow_file("cleanup-shared-dir")
+
+                self.assertFalse(path.exists())
+                self.assertTrue(path.parent.is_dir())
+
+    def test_single_run_removes_the_transient_definition_on_success_and_failure(self) -> None:
+        for task_id, error in (("cleanup-success", None), ("cleanup-failure", RuntimeError("failed"))):
+            with self.subTest(task_id=task_id):
+                payload = {"taskId": task_id, "workflow": {"nodes": []}, "output": "results"}
+                path, _format = worker_workflows._write_workflow_file(payload, task_id)
+                self.addCleanup(path.unlink, missing_ok=True)
+                run = patch.object(
+                    worker_workflows,
+                    "_run_pymss",
+                    return_value={"files": [], "outputs": [], "outputDir": "results", "outputFormat": "wav"},
+                    side_effect=error,
+                )
+                with run, patch.object(worker_workflows, "emit"), patch.object(worker_workflows, "emit_error", return_value=1):
+                    expected = 1 if error else 0
+                    self.assertEqual(worker_workflows.cmd_infer_workflow(payload), expected)
+                self.assertFalse(path.exists())
+
+    def test_batch_run_removes_each_task_definition(self) -> None:
+        task_ids = ["cleanup-batch-1", "cleanup-batch-2"]
+        payload = {
+            "taskId": "cleanup-batch",
+            "workflow": {"nodes": []},
+            "output": "results",
+            "tasks": [{"taskId": task_id} for task_id in task_ids],
+        }
+        paths = [worker_workflows._write_workflow_file(payload, task_id)[0] for task_id in task_ids]
+        for path in paths:
+            self.addCleanup(path.unlink, missing_ok=True)
+        result = {"files": [], "outputs": [], "outputDir": "results", "outputFormat": "wav"}
+        with patch.object(worker_workflows, "_run_pymss", return_value=result), \
+             patch.object(worker_workflows, "emit"), patch.object(worker_workflows, "emit_error", return_value=1):
+            self.assertEqual(worker_workflows.cmd_infer_workflow(payload), 0)
+        self.assertTrue(all(not path.exists() for path in paths))
 
 
 class LegacyWorkflowInputTests(unittest.TestCase):

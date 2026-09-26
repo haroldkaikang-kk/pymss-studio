@@ -9,6 +9,20 @@ from typing import Any
 
 from worker_protocol import emit, emit_error
 
+
+def _claim_export_path(path: Path) -> Path:
+    """Reserve a new editor-export path without overwriting an earlier mix."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for index in range(1, 1000):
+        candidate = path if index == 1 else path.with_name(f"{path.stem}_{index}{path.suffix}")
+        try:
+            candidate.touch(exist_ok=False)
+        except FileExistsError:
+            continue
+        return candidate
+    raise FileExistsError(f"Failed to reserve a unique export filename: {path}")
+
+
 def _audio_metadata(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(str(path))
@@ -466,10 +480,15 @@ def cmd_export_editor_mix(payload: dict[str, Any]) -> int:
             requested = str(audio_params.get("wav_bit_depth") or audio_params.get("wavBitDepth") or "PCM_24").upper()
             subtype = requested if requested in {"PCM_16", "PCM_24", "FLOAT"} else "PCM_24"
 
+        output_path = _claim_export_path(output_path)
         write_kwargs: dict[str, Any] = {}
         if subtype:
             write_kwargs["subtype"] = subtype
-        sf.write(str(output_path), mix.T, target_rate, **write_kwargs)
+        try:
+            sf.write(str(output_path), mix.T, target_rate, **write_kwargs)
+        except Exception:
+            output_path.unlink(missing_ok=True)
+            raise
         emit("editor_mix_exported", {
             "path": str(output_path),
             "duration": total_samples / target_rate,

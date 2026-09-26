@@ -194,14 +194,13 @@ function syncSeparateNodeStems(node: LGraphNode) {
   const stems = stemsForModel(modelName)
   if (!stems.length) return
 
-  const outputs = node.outputs || []
-  const hasPlaceholders = outputs.some((o) => /^stem_\d+/.test(String(o.name || '')))
-  const currentAudioOutputs = outputs.filter((o) => !String(o.name || '').endsWith('(String)'))
-
-  // If outputs have never been set, or are placeholders, or the number of stems changed (e.g. 2 stems -> 6 stems):
-  if (!outputs.length || hasPlaceholders || currentAudioOutputs.length !== stems.length) {
+  const desiredOutputNames = stems.flatMap(stem => [`${stem} (Audio)`, `${stem} (String)`])
+  const currentOutputNames = (node.outputs || []).map(output => String(output.name || ''))
+  if (
+    currentOutputNames.length !== desiredOutputNames.length
+    || currentOutputNames.some((name, index) => name !== desiredOutputNames[index])
+  ) {
     setSeparateStems(node, stems)
-    return
   }
 }
 

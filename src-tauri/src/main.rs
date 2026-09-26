@@ -132,6 +132,7 @@ fn main() {
             commands::app_cmd::pick_model_weights_file,
             commands::app_cmd::pick_model_config_file,
             commands::app_cmd::load_app_store,
+            commands::app_cmd::mutate_workflow_store,
             commands::app_cmd::load_editor_project,
             commands::app_cmd::relink_editor_sources,
             commands::app_cmd::open_editor_window,

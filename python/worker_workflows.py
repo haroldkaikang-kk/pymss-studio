@@ -145,6 +145,16 @@ def _write_workflow_file(payload: dict[str, Any], task_id: str) -> tuple[Path, s
     return path, fmt
 
 
+def _cleanup_workflow_file(task_id: str) -> None:
+    """Remove the transient graph definition created for one workflow task."""
+    temp_dir = Path(tempfile.gettempdir()) / "pymss-studio-workflows"
+    for extension in ("json", "yaml"):
+        try:
+            (temp_dir / f"{task_id}.{extension}").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _resolve_device(payload: dict[str, Any]) -> str | None:
     device = str(payload.get("device") or "").strip().lower()
     return device or None
@@ -872,6 +882,8 @@ def cmd_infer_workflow(payload: dict[str, Any]) -> int:
         return 0
     except Exception as exc:
         return emit_error("WORKFLOW_RUN_FAILED", str(exc), traceback.format_exc(), task_id=task_id)
+    finally:
+        _cleanup_workflow_file(task_id)
 
 
 def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> int:
@@ -916,6 +928,8 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
             except Exception as exc:
                 failed = True
                 emit_error("WORKFLOW_RUN_FAILED", str(exc), traceback.format_exc(), task_id=task_id)
+            finally:
+                _cleanup_workflow_file(task_id)
         return 1 if failed else 0
     except Exception as exc:
         detail = traceback.format_exc()

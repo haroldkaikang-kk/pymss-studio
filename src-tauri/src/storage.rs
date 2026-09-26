@@ -293,6 +293,10 @@ pub(crate) fn write_json_file(path: &Path, data: &Value) -> AppResult<()> {
     let _write_guard = JSON_WRITE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    write_json_file_locked(path, data)
+}
+
+fn write_json_file_locked(path: &Path, data: &Value) -> AppResult<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -321,6 +325,245 @@ pub(crate) fn write_json_file(path: &Path, data: &Value) -> AppResult<()> {
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+pub fn mutate_workflow_store(app: &AppHandle, mutation: &Value) -> AppResult<Value> {
+    ensure_app_directories(app)?;
+    let path = app_store_path(app, "workflow-state")?;
+    let _write_guard = JSON_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let state = if path.is_file() {
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str::<Value>(&content)?
+    } else {
+        serde_json::json!({ "workflows": [], "selectedWorkflowId": "" })
+    };
+    let response = apply_workflow_mutation(state, mutation)?;
+    if response.get("conflict").is_none() {
+        let next_state = response
+            .get("state")
+            .ok_or_else(|| AppError::Worker("workflow mutation returned no state".into()))?;
+        write_json_file_locked(&path, next_state)?;
+    }
+    Ok(response)
+}
+
+fn missing_workflow_id(item: &Value) -> bool {
+    item.is_object()
+        && item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+}
+
+fn legacy_workflow_index(workflow_list: &[Value], mutation: &Value) -> Option<usize> {
+    let legacy_index = mutation
+        .get("legacyIndex")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let legacy_entry = mutation.get("legacyEntry");
+    let is_match = |item: &Value| {
+        missing_workflow_id(item)
+            && legacy_entry
+                .map(|expected| expected == item)
+                .unwrap_or(true)
+    };
+    legacy_index
+        .filter(|index| workflow_list.get(*index).is_some_and(&is_match))
+        .or_else(|| legacy_entry.and_then(|_| workflow_list.iter().position(is_match)))
+}
+
+fn apply_workflow_mutation(mut state: Value, mutation: &Value) -> AppResult<Value> {
+    if !state.is_object() {
+        state = serde_json::json!({ "workflows": [], "selectedWorkflowId": "" });
+    }
+    let state_object = state
+        .as_object_mut()
+        .ok_or_else(|| AppError::Worker("workflow store must be an object".into()))?;
+    let selected_before = state_object
+        .get("selectedWorkflowId")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let workflows = state_object
+        .entry("workflows")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !workflows.is_array() {
+        *workflows = Value::Array(Vec::new());
+    }
+    let workflow_list = workflows
+        .as_array_mut()
+        .ok_or_else(|| AppError::Worker("workflow list must be an array".into()))?;
+    let action = mutation.get("action").and_then(Value::as_str).unwrap_or("");
+    let mut conflict = None;
+
+    match action {
+        "upsert" => {
+            let mut entry = mutation
+                .get("entry")
+                .cloned()
+                .filter(Value::is_object)
+                .ok_or_else(|| AppError::Worker("workflow entry is required".into()))?;
+            let workflow_id = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| AppError::Worker("workflow id is required".into()))?
+                .to_string();
+            let mut existing_index = workflow_list.iter().position(|item| {
+                item.get("id").and_then(Value::as_str) == Some(workflow_id.as_str())
+            });
+            let has_legacy_reference =
+                mutation.get("legacyIndex").is_some() || mutation.get("legacyEntry").is_some();
+            let mut legacy_target_mismatch = false;
+            if existing_index.is_none() {
+                existing_index = legacy_workflow_index(workflow_list, mutation);
+                if existing_index.is_none() && has_legacy_reference {
+                    legacy_target_mismatch = true;
+                }
+            }
+            let actual_updated_at = existing_index
+                .and_then(|index| workflow_list[index].get("updatedAt"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let expected_updated_at = mutation.get("expectedUpdatedAt").and_then(Value::as_u64);
+            let force = mutation
+                .get("force")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !force
+                && (legacy_target_mismatch
+                    || (expected_updated_at.is_some()
+                        && expected_updated_at.unwrap_or(0) != actual_updated_at))
+            {
+                conflict = Some(serde_json::json!({
+                    "workflowId": workflow_id,
+                    "expectedUpdatedAt": expected_updated_at.unwrap_or(0),
+                    "actualUpdatedAt": actual_updated_at,
+                }));
+            } else {
+                if let Some(index) = existing_index {
+                    let created_at = workflow_list[index]
+                        .get("createdAt")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    if created_at > 0 {
+                        entry["createdAt"] = Value::from(created_at);
+                    }
+                }
+                let requested_updated_at =
+                    entry.get("updatedAt").and_then(Value::as_u64).unwrap_or(0);
+                entry["updatedAt"] =
+                    Value::from(requested_updated_at.max(actual_updated_at.saturating_add(1)));
+                if let Some(index) = existing_index {
+                    workflow_list[index] = entry;
+                } else {
+                    workflow_list.push(entry);
+                }
+                workflow_list.sort_by(|left, right| {
+                    let left_value = left.get("updatedAt").and_then(Value::as_u64).unwrap_or(0);
+                    let right_value = right.get("updatedAt").and_then(Value::as_u64).unwrap_or(0);
+                    right_value.cmp(&left_value)
+                });
+                state_object.insert("selectedWorkflowId".into(), Value::String(workflow_id));
+            }
+        }
+        "delete" => {
+            let workflow_id = mutation
+                .get("workflowId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let index = workflow_list
+                .iter()
+                .position(|item| item.get("id").and_then(Value::as_str) == Some(workflow_id))
+                .or_else(|| legacy_workflow_index(workflow_list, mutation));
+            let actual_updated_at = index
+                .and_then(|index| workflow_list[index].get("updatedAt"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let expected_updated_at = mutation.get("expectedUpdatedAt").and_then(Value::as_u64);
+            let has_legacy_reference =
+                mutation.get("legacyIndex").is_some() || mutation.get("legacyEntry").is_some();
+            if (index.is_none() && has_legacy_reference)
+                || (expected_updated_at.is_some()
+                    && expected_updated_at.unwrap_or(0) != actual_updated_at)
+            {
+                conflict = Some(serde_json::json!({
+                    "workflowId": workflow_id,
+                    "expectedUpdatedAt": expected_updated_at.unwrap_or(0),
+                    "actualUpdatedAt": actual_updated_at,
+                }));
+            } else {
+                let removed_selected = index
+                    .map(|index| workflow_list.remove(index))
+                    .and_then(|item| {
+                        item.get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .is_some_and(|removed_id| removed_id == selected_before);
+                if selected_before == workflow_id || removed_selected {
+                    let replacement = workflow_list
+                        .first()
+                        .and_then(|item| item.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    state_object.insert("selectedWorkflowId".into(), Value::String(replacement));
+                }
+            }
+        }
+        "select" => {
+            let workflow_id = mutation
+                .get("workflowId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let existing_index = workflow_list
+                .iter()
+                .position(|item| item.get("id").and_then(Value::as_str) == Some(workflow_id));
+            let legacy_index = existing_index
+                .is_none()
+                .then(|| legacy_workflow_index(workflow_list, mutation))
+                .flatten();
+            let has_legacy_reference =
+                mutation.get("legacyIndex").is_some() || mutation.get("legacyEntry").is_some();
+            if !workflow_id.is_empty()
+                && existing_index.is_none()
+                && legacy_index.is_none()
+                && has_legacy_reference
+            {
+                conflict = Some(serde_json::json!({
+                    "workflowId": workflow_id,
+                    "expectedUpdatedAt": 0,
+                    "actualUpdatedAt": 0,
+                }));
+            } else {
+                if let Some(index) = legacy_index {
+                    workflow_list[index]["id"] = Value::String(workflow_id.to_string());
+                }
+                if workflow_id.is_empty() || existing_index.is_some() || legacy_index.is_some() {
+                    state_object.insert(
+                        "selectedWorkflowId".into(),
+                        Value::String(workflow_id.to_string()),
+                    );
+                }
+            }
+        }
+        _ => {
+            return Err(AppError::Worker(format!(
+                "unknown workflow mutation: {action}"
+            )))
+        }
+    }
+
+    if let Some(conflict) = conflict {
+        return Ok(serde_json::json!({ "state": state, "conflict": conflict }));
+    }
+    Ok(serde_json::json!({ "state": state }))
 }
 
 #[cfg(windows)]
@@ -374,7 +617,8 @@ fn replace_file(temporary: &Path, destination: &Path) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_data_root, store_file_name, write_json_file, JSON_WRITE_SEQUENCE,
+        apply_workflow_mutation, resolve_data_root, store_file_name, write_json_file,
+        JSON_WRITE_SEQUENCE,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -382,6 +626,264 @@ mod tests {
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(name)
+    }
+
+    #[test]
+    fn workflow_mutations_merge_different_editor_saves_into_the_latest_state() {
+        let initial = json!({
+            "workflows": [
+                { "id": "first", "name": "First", "createdAt": 1, "updatedAt": 10 },
+                { "id": "second", "name": "Second", "createdAt": 2, "updatedAt": 10 },
+            ],
+            "selectedWorkflowId": "first",
+        });
+        let first = apply_workflow_mutation(
+            initial,
+            &json!({
+                "action": "upsert",
+                "entry": { "id": "first", "name": "First changed", "createdAt": 1, "updatedAt": 20 },
+                "expectedUpdatedAt": 10,
+            }),
+        )
+        .unwrap();
+        let second = apply_workflow_mutation(
+            first["state"].clone(),
+            &json!({
+                "action": "upsert",
+                "entry": { "id": "second", "name": "Second changed", "createdAt": 2, "updatedAt": 21 },
+                "expectedUpdatedAt": 10,
+            }),
+        )
+        .unwrap();
+        let workflows = second["state"]["workflows"].as_array().unwrap();
+        assert_eq!(workflows.len(), 2);
+        assert!(workflows
+            .iter()
+            .any(|item| item["id"] == "first" && item["name"] == "First changed"));
+        assert!(workflows
+            .iter()
+            .any(|item| item["id"] == "second" && item["name"] == "Second changed"));
+    }
+
+    #[test]
+    fn workflow_mutation_reports_a_real_persisted_revision_conflict() {
+        let state = json!({
+            "workflows": [{ "id": "first", "name": "Remote", "createdAt": 1, "updatedAt": 20 }],
+            "selectedWorkflowId": "first",
+        });
+        let response = apply_workflow_mutation(
+            state.clone(),
+            &json!({
+                "action": "upsert",
+                "entry": { "id": "first", "name": "Stale", "createdAt": 1, "updatedAt": 21 },
+                "expectedUpdatedAt": 10,
+            }),
+        )
+        .unwrap();
+        assert_eq!(response["conflict"]["actualUpdatedAt"], 20);
+        assert_eq!(response["state"], state);
+    }
+
+    #[test]
+    fn workflow_mutation_can_clear_the_selected_workflow() {
+        let state = json!({
+            "workflows": [{ "id": "first", "name": "First", "createdAt": 1, "updatedAt": 10 }],
+            "selectedWorkflowId": "first",
+        });
+        let response = apply_workflow_mutation(
+            state,
+            &json!({ "action": "select", "workflowId": "" }),
+        )
+        .unwrap();
+        assert_eq!(response["state"]["selectedWorkflowId"], "");
+        assert_eq!(response["state"]["workflows"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn workflow_mutation_migrates_a_legacy_entry_without_creating_a_duplicate() {
+        let state = json!({
+            "workflows": [{ "name": "Legacy", "definition": {}, "createdAt": 1 }],
+            "selectedWorkflowId": "",
+        });
+        let response = apply_workflow_mutation(
+            state,
+            &json!({
+                "action": "upsert",
+                "entry": {
+                    "id": "workflow_generated",
+                    "name": "Migrated",
+                    "definition": {},
+                    "createdAt": 2,
+                    "updatedAt": 10,
+                },
+                "expectedUpdatedAt": 0,
+                "legacyIndex": 0,
+            }),
+        )
+        .unwrap();
+        let workflows = response["state"]["workflows"].as_array().unwrap();
+        assert_eq!(workflows.len(), 1);
+        assert_eq!(workflows[0]["id"], "workflow_generated");
+        assert_eq!(workflows[0]["name"], "Migrated");
+    }
+
+    #[test]
+    fn stale_legacy_index_conflicts_instead_of_creating_a_duplicate() {
+        let state = json!({
+            "workflows": [{
+                "id": "workflow_saved_elsewhere",
+                "name": "Remote",
+                "definition": {},
+                "createdAt": 1,
+                "updatedAt": 20,
+            }],
+            "selectedWorkflowId": "workflow_saved_elsewhere",
+        });
+        let response = apply_workflow_mutation(
+            state.clone(),
+            &json!({
+                "action": "upsert",
+                "entry": {
+                    "id": "workflow_generated_locally",
+                    "name": "Local",
+                    "definition": {},
+                    "createdAt": 2,
+                    "updatedAt": 10,
+                },
+                "expectedUpdatedAt": 0,
+                "legacyIndex": 0,
+            }),
+        )
+        .unwrap();
+        assert!(response.get("conflict").is_some());
+        assert_eq!(response["state"], state);
+    }
+
+    #[test]
+    fn legacy_entry_identity_survives_reordering_before_migration() {
+        let target = json!({ "name": "Target legacy", "definition": {}, "updatedAt": 5 });
+        let state = json!({
+            "workflows": [
+                { "name": "Other legacy", "definition": {}, "updatedAt": 7 },
+                target.clone(),
+            ],
+            "selectedWorkflowId": "",
+        });
+        let response = apply_workflow_mutation(
+            state,
+            &json!({
+                "action": "upsert",
+                "entry": {
+                    "id": "workflow_target",
+                    "name": "Migrated target",
+                    "definition": {},
+                    "createdAt": 2,
+                    "updatedAt": 10,
+                },
+                "expectedUpdatedAt": 5,
+                "legacyIndex": 0,
+                "legacyEntry": target,
+            }),
+        )
+        .unwrap();
+        let workflows = response["state"]["workflows"].as_array().unwrap();
+        assert_eq!(workflows.len(), 2);
+        assert!(workflows
+            .iter()
+            .any(|item| item["id"] == "workflow_target" && item["name"] == "Migrated target"));
+        assert!(workflows
+            .iter()
+            .any(|item| item["name"] == "Other legacy" && item.get("id").is_none()));
+    }
+
+    #[test]
+    fn legacy_entries_support_select_and_delete_mutations() {
+        let first = json!({ "name": "First legacy", "definition": {} });
+        let second = json!({ "name": "Second legacy", "definition": {} });
+        let state = json!({
+            "workflows": [first.clone(), second.clone()],
+            "selectedWorkflowId": "",
+        });
+        let selected = apply_workflow_mutation(
+            state,
+            &json!({
+                "action": "select",
+                "workflowId": "workflow_second",
+                "legacyIndex": 1,
+                "legacyEntry": second,
+            }),
+        )
+        .unwrap();
+        assert_eq!(selected["state"]["selectedWorkflowId"], "workflow_second");
+        assert_eq!(selected["state"]["workflows"][1]["id"], "workflow_second");
+
+        let deleted = apply_workflow_mutation(
+            selected["state"].clone(),
+            &json!({
+                "action": "delete",
+                "workflowId": "workflow_first",
+                "legacyIndex": 0,
+                "legacyEntry": first,
+            }),
+        )
+        .unwrap();
+        let workflows = deleted["state"]["workflows"].as_array().unwrap();
+        assert_eq!(workflows.len(), 1);
+        assert_eq!(workflows[0]["id"], "workflow_second");
+    }
+
+    #[test]
+    fn stale_legacy_delete_and_select_report_conflicts() {
+        let legacy = json!({ "name": "Legacy", "definition": {} });
+        let migrated = json!({
+            "id": "workflow_remote",
+            "name": "Legacy",
+            "definition": {},
+            "updatedAt": 20,
+        });
+        let state = json!({
+            "workflows": [migrated],
+            "selectedWorkflowId": "workflow_remote",
+        });
+        for action in ["delete", "select"] {
+            let response = apply_workflow_mutation(
+                state.clone(),
+                &json!({
+                    "action": action,
+                    "workflowId": "workflow_stale",
+                    "legacyIndex": 0,
+                    "legacyEntry": legacy,
+                }),
+            )
+            .unwrap();
+            assert!(response.get("conflict").is_some(), "{action}");
+            assert_eq!(response["state"], state, "{action}");
+        }
+    }
+
+    #[test]
+    fn stale_delete_does_not_remove_a_newer_workflow_revision() {
+        let state = json!({
+            "workflows": [{
+                "id": "workflow",
+                "name": "Updated elsewhere",
+                "definition": {},
+                "createdAt": 1,
+                "updatedAt": 20,
+            }],
+            "selectedWorkflowId": "workflow",
+        });
+        let response = apply_workflow_mutation(
+            state.clone(),
+            &json!({
+                "action": "delete",
+                "workflowId": "workflow",
+                "expectedUpdatedAt": 10,
+            }),
+        )
+        .unwrap();
+        assert_eq!(response["conflict"]["actualUpdatedAt"], 20);
+        assert_eq!(response["state"], state);
     }
 
     struct ResourceFixture(PathBuf);

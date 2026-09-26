@@ -748,6 +748,8 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
     log_handler = None
     separator = None
     active_task_id: str | None = None
+    terminal_task_ids: set[str] = set()
+    failed = False
     last_reported_done: float | None = None
     last_reported_total: float | None = None
     last_progress_message = ""
@@ -806,6 +808,8 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
             success_files = separator.process_folder(item["input"], int(item.get("inputIndex") or 1))
             if Path(item["input"]).name not in {Path(name).name for name in success_files}:
                 emit_error("INFERENCE_FAILED", f"Batch separation did not produce outputs for {Path(item['input']).name}", task_id=task_id)
+                terminal_task_ids.add(task_id)
+                failed = True
                 continue
             task_output = resolve_pymss_output_dir(output_root, success_files, item["input"], save_as_folder)
             emit("task_stage", {"stage": "writing_output", "message": "Collecting outputs"}, task_id=task_id)
@@ -816,11 +820,13 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
                 "outputDir": str(Path(task_output).resolve()),
                 "outputFormat": output_format,
             }, task_id=task_id)
+            terminal_task_ids.add(task_id)
         active_task_id = None
-        return 0
+        return 1 if failed else 0
     except Exception as exc:
         for item in batch_tasks:
-            _emit_inference_error(exc, item["taskId"])
+            if item["taskId"] not in terminal_task_ids:
+                _emit_inference_error(exc, item["taskId"])
         return 1
     finally:
         if logger is not None and log_handler is not None:

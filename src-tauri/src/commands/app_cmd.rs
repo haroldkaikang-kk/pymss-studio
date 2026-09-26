@@ -915,6 +915,24 @@ pub async fn save_app_store(app: AppHandle, name: String, data: Value) -> AppRes
     Ok(())
 }
 
+#[tauri::command]
+pub async fn mutate_workflow_store(app: AppHandle, payload: Value) -> AppResult<Value> {
+    session_log::append(
+        &app,
+        "DEBUG",
+        "workflow.store.mutate",
+        vec![(
+            "action",
+            payload
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        )],
+    );
+    storage::mutate_workflow_store(&app, &payload)
+}
+
 fn value_type(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",

@@ -134,6 +134,69 @@ test('separate nodes shrink after switching from six stems to two', () => {
   assert.equal(node.outputs.length, 4)
 })
 
+test('separate stem changes preserve matching links and drop only removed stems', () => {
+  const graph = new LGraph()
+  const separate = LiteGraph.createNode('mss_separate')
+  const vocalsSave = LiteGraph.createNode('pymss_save_audio')
+  const instrumentalSave = LiteGraph.createNode('pymss_save_audio')
+  graph.add(separate)
+  graph.add(vocalsSave)
+  graph.add(instrumentalSave)
+  setSeparateStems(separate, ['vocals', 'instrumental'])
+  separate.connect(0, vocalsSave, 0)
+  separate.connect(2, instrumentalSave, 0)
+
+  setSeparateStems(separate, ['Vocals', 'drums', 'bass', 'other'])
+
+  assert.deepEqual(separate.outputs.map(output => output.name), [
+    'Vocals (Audio)', 'Vocals (String)',
+    'drums (Audio)', 'drums (String)',
+    'bass (Audio)', 'bass (String)',
+    'other (Audio)', 'other (String)',
+  ])
+  assert.notEqual(vocalsSave.inputs[0].link, null)
+  assert.equal(instrumentalSave.inputs[0].link, null)
+})
+
+test('placeholder separate outputs retain positional links when a model is selected', () => {
+  const graph = new LGraph()
+  const separate = LiteGraph.createNode('mss_separate')
+  const save = LiteGraph.createNode('pymss_save_audio')
+  graph.add(separate)
+  graph.add(save)
+  separate.connect(0, save, 0)
+
+  setSeparateStems(separate, ['vocals', 'instrumental'])
+
+  assert.notEqual(save.inputs[0].link, null)
+  assert.equal(separate.outputs[0].name, 'vocals (Audio)')
+})
+
+test('separate stem changes preserve reroute chains on retained links', () => {
+  const graph = new LGraph()
+  const separate = LiteGraph.createNode('mss_separate')
+  const save = LiteGraph.createNode('pymss_save_audio')
+  graph.add(separate)
+  graph.add(save)
+  setSeparateStems(separate, ['vocals', 'instrumental'])
+  const originalLink = separate.connect(0, save, 0)
+  assert.ok(originalLink)
+  const firstReroute = graph.createReroute([180, 120], originalLink)
+  const lastReroute = graph.createReroute([240, 160], originalLink)
+  assert.equal(lastReroute.parentId, firstReroute.id)
+  assert.equal(originalLink.parentId, lastReroute.id)
+
+  setSeparateStems(separate, ['Vocals', 'drums', 'bass', 'other'])
+
+  const restoredLink = graph.getLink(save.inputs[0].link)
+  const restoredFirst = graph.getReroute(firstReroute.id)
+  const restoredLast = graph.getReroute(lastReroute.id)
+  assert.equal(restoredLink.parentId, lastReroute.id)
+  assert.equal(restoredLast.parentId, firstReroute.id)
+  assert.deepEqual(Array.from(restoredFirst.pos), [180, 120])
+  assert.deepEqual(Array.from(restoredLast.pos), [240, 160])
+})
+
 test('separate nodes restore at a readable minimum width without shrinking wider layouts', () => {
   const graph = new LGraph()
   const node = LiteGraph.createNode('mss_separate')

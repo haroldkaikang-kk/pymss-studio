@@ -20,6 +20,7 @@ import { storeToRefs } from 'pinia'
 import WorkflowCreateChooser from '@/components/workflow/WorkflowCreateChooser.vue'
 import { useModelStore } from '@/stores/model'
 import {
+  WorkflowRevisionConflictError,
   useWorkflowStore,
   type WorkflowEntry,
 } from '@/stores/workflow'
@@ -343,18 +344,28 @@ async function saveMeta() {
     return
   }
   if (trimmedName === current.name && description.value.trim() === current.description) return
-  const entry = await workflow.saveWorkflow({
-    id: targetId,
-    name: trimmedName,
-    description: description.value,
-    definition: current.definition,
-  })
-  // Guard against a race: if the user switched workflows while saveWorkflow was
-  // awaiting, do not clobber the newly selected workflow's displayed fields.
-  if (selectedWorkflowId.value !== targetId) return
-  editingId.value = entry.id
-  name.value = entry.name
-  description.value = entry.description
+  try {
+    const entry = await workflow.saveWorkflow({
+      id: targetId,
+      name: trimmedName,
+      description: description.value,
+      definition: current.definition,
+      expectedUpdatedAt: current.updatedAt,
+    })
+    // Guard against a race: if the user switched workflows while saveWorkflow was
+    // awaiting, do not clobber the newly selected workflow's displayed fields.
+    if (selectedWorkflowId.value !== targetId) return
+    editingId.value = entry.id
+    name.value = entry.name
+    description.value = entry.description
+  } catch (error) {
+    if (error instanceof WorkflowRevisionConflictError && selectedWorkflowId.value === targetId) {
+      syncWorkflowDetails(selectedWorkflow.value)
+    }
+    message.error(error instanceof WorkflowRevisionConflictError
+      ? t('workflows.revisionConflictTitle')
+      : error instanceof Error ? error.message : t('workflows.saveFailed'))
+  }
 }
 
 async function openSimpleEditor(options: { forceNew?: boolean; workflowId?: string } = {}) {
@@ -555,9 +566,15 @@ function deleteWorkflow(item: WorkflowEntry) {
     negativeText: t('common.cancel'),
     onPositiveClick: async () => {
       const deletedId = current.id
-      await workflow.deleteWorkflow(current.id)
-      if (simpleEditorOpenWorkflowId.value === deletedId) workflow.markSimpleEditorClosed()
-      message.success(t('workflows.deleted'))
+      try {
+        await workflow.deleteWorkflow(current.id)
+        if (simpleEditorOpenWorkflowId.value === deletedId) workflow.markSimpleEditorClosed()
+        message.success(t('workflows.deleted'))
+      } catch (error) {
+        message.error(error instanceof WorkflowRevisionConflictError
+          ? t('workflows.revisionConflictTitle')
+          : error instanceof Error ? error.message : t('workflows.saveFailed'))
+      }
     },
   })
 }

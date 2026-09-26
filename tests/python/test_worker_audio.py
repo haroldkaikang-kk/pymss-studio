@@ -17,6 +17,44 @@ from worker_audio import _apply_track_effects, cmd_export_editor_mix
 
 
 class EditorEffectTests(unittest.TestCase):
+    def _export_payload(self, root: Path, source: Path, *, name: str = "effects") -> dict:
+        return {
+            "project": {
+                "id": "project",
+                "name": name,
+                "masterVolume": 1,
+                "masterPan": 0,
+                "assets": [{
+                    "id": "source",
+                    "path": str(source),
+                    "duration": 0.2,
+                    "sampleRate": 1000,
+                    "channels": 1,
+                }],
+                "tracks": [{
+                    "id": "track",
+                    "sourceId": "source",
+                    "volume": 1,
+                    "pan": 0,
+                    "muted": False,
+                    "solo": False,
+                    "effects": {"reverb": 0, "delay": 1, "delayTime": 0.1},
+                    "clips": [{
+                        "assetId": "source",
+                        "start": 0,
+                        "offset": 0,
+                        "duration": 0.2,
+                        "volume": 1,
+                        "fadeIn": 0,
+                        "fadeOut": 0,
+                        "muted": False,
+                    }],
+                }],
+            },
+            "exportDir": str(root / "output"),
+            "format": "wav",
+        }
+
     def test_disabled_effects_leave_audio_unchanged(self) -> None:
         audio = np.array([[0.1, -0.2, 0.3]], dtype=np.float32)
         rendered = _apply_track_effects(audio, {}, 1000)
@@ -41,48 +79,31 @@ class EditorEffectTests(unittest.TestCase):
             samples = np.zeros(200, dtype=np.float32)
             samples[0] = 1.0
             sf.write(source, samples, 1000)
-            payload = {
-                "project": {
-                    "id": "project",
-                    "name": "effects",
-                    "masterVolume": 1,
-                    "masterPan": 0,
-                    "assets": [{
-                        "id": "source",
-                        "path": str(source),
-                        "duration": 0.2,
-                        "sampleRate": 1000,
-                        "channels": 1,
-                    }],
-                    "tracks": [{
-                        "id": "track",
-                        "sourceId": "source",
-                        "volume": 1,
-                        "pan": 0,
-                        "muted": False,
-                        "solo": False,
-                        "effects": {"reverb": 0, "delay": 1, "delayTime": 0.1},
-                        "clips": [{
-                            "assetId": "source",
-                            "start": 0,
-                            "offset": 0,
-                            "duration": 0.2,
-                            "volume": 1,
-                            "fadeIn": 0,
-                            "fadeOut": 0,
-                            "muted": False,
-                        }],
-                    }],
-                },
-                "exportDir": str(root / "output"),
-                "format": "wav",
-            }
+            payload = self._export_payload(root, source)
             with mock.patch("worker_audio.emit"):
                 self.assertEqual(cmd_export_editor_mix(payload), 0)
             rendered, sample_rate = sf.read(str(root / "output" / "effects_mix.wav"))
 
         self.assertEqual(sample_rate, 1000)
         self.assertGreater(len(rendered), len(samples))
+
+    def test_repeated_editor_exports_preserve_the_previous_mix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_value:
+            root = Path(temp_value)
+            source = root / "source.wav"
+            sf.write(source, np.ones(200, dtype=np.float32) * 0.1, 1000)
+            payload = self._export_payload(root, source, name="repeat")
+            events: list[dict] = []
+            with mock.patch("worker_audio.emit", side_effect=lambda _type, value: events.append(value)):
+                self.assertEqual(cmd_export_editor_mix(payload), 0)
+                first = root / "output" / "repeat_mix.wav"
+                first_bytes = first.read_bytes()
+                self.assertEqual(cmd_export_editor_mix(payload), 0)
+
+            second = root / "output" / "repeat_mix_2.wav"
+            self.assertTrue(second.is_file())
+            self.assertEqual(first.read_bytes(), first_bytes)
+            self.assertEqual([Path(event["path"]).name for event in events], [first.name, second.name])
 
 
 if __name__ == "__main__":

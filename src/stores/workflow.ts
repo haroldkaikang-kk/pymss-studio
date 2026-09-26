@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { loadAppStore, saveAppStore } from '@/utils/appStore'
+import { invoke } from '@tauri-apps/api/core'
+import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
 import {
   detectWorkflowFormat,
   normalizeGraphWorkflowDefinition,
@@ -54,6 +55,25 @@ type LoadedWorkflowState = {
   selectedWorkflowId: string
 }
 
+type WorkflowStoreMutation = {
+  action: 'upsert' | 'delete' | 'select'
+  entry?: WorkflowEntry
+  workflowId?: string
+  expectedUpdatedAt?: number
+  legacyIndex?: number
+  legacyEntry?: Partial<WorkflowEntry>
+  force?: boolean
+}
+
+type WorkflowMutationResponse = {
+  state: StoredWorkflowState
+  conflict?: {
+    workflowId: string
+    expectedUpdatedAt: number
+    actualUpdatedAt: number
+  }
+}
+
 function createId(prefix = 'workflow') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
 }
@@ -87,7 +107,7 @@ function normalizeWorkflow(input: Partial<WorkflowEntry>): WorkflowEntry | null 
       ? Number(input.formatVersion)
       : WORKFLOW_FORMAT_VERSION,
     createdAt: Number.isFinite(Number(input.createdAt)) ? Number(input.createdAt) : now,
-    updatedAt: Number.isFinite(Number(input.updatedAt)) ? Number(input.updatedAt) : now,
+    updatedAt: Number.isFinite(Number(input.updatedAt)) ? Number(input.updatedAt) : 0,
   }
 }
 
@@ -99,8 +119,10 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const initialized = ref(false)
   const isSaving = ref(false)
   const selectedWorkflow = computed(() => workflows.value.find(item => item.id === selectedWorkflowId.value) || null)
-  let persistQueue = Promise.resolve()
   let pendingPersistCount = 0
+  let mutationQueue = Promise.resolve()
+  let selectionMutationGeneration = 0
+  let legacyWorkflowReferences = new Map<string, { index: number; entry: Partial<WorkflowEntry> }>()
   // Bootstrap and standalone node-editor windows can call initialize() at the
   // same time. Share one in-flight load so a slower second read cannot race
   // the first one and leave the editor with an empty/stale workflow list.
@@ -108,19 +130,38 @@ export const useWorkflowStore = defineStore('workflow', () => {
   let editorCloseRefreshPromise: Promise<WorkflowEntry | null> | null = null
   let editorCloseRefreshGeneration = 0
 
-  function persist() {
-    const snapshot = JSON.parse(JSON.stringify({
-      workflows: workflows.value,
-      selectedWorkflowId: selectedWorkflowId.value,
-    })) as StoredWorkflowState
+  function queueMutation<T>(operation: () => Promise<T>) {
     pendingPersistCount += 1
     isSaving.value = true
-    const run = persistQueue.then(() => saveAppStore('workflow-state', snapshot))
-    persistQueue = run.catch(() => undefined)
+    const run = mutationQueue.catch(() => undefined).then(operation)
+    mutationQueue = run.then(() => undefined, () => undefined)
     return run.finally(() => {
       pendingPersistCount -= 1
       isSaving.value = pendingPersistCount > 0
     })
+  }
+
+  function normalizeStoredState(stored: StoredWorkflowState | null | undefined): LoadedWorkflowState {
+    const nextLegacyReferences = new Map<string, { index: number; entry: Partial<WorkflowEntry> }>()
+    const loadedWorkflows = (stored?.workflows || [])
+      .map((item, index) => {
+        const normalized = normalizeWorkflow(item)
+        if (normalized && !String(item.id || '').trim()) {
+          nextLegacyReferences.set(normalized.id, {
+            index,
+            entry: JSON.parse(JSON.stringify(item)) as Partial<WorkflowEntry>,
+          })
+        }
+        return normalized
+      })
+      .filter((item): item is WorkflowEntry => Boolean(item))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+    const storedSelectedId = String(stored?.selectedWorkflowId || '')
+    const loadedSelectedId = loadedWorkflows.some(item => item.id === storedSelectedId)
+      ? storedSelectedId
+      : loadedWorkflows[0]?.id || ''
+    legacyWorkflowReferences = nextLegacyReferences
+    return { workflows: loadedWorkflows, selectedWorkflowId: loadedSelectedId }
   }
 
   async function readStoredState(throwOnError = false): Promise<LoadedWorkflowState> {
@@ -128,21 +169,129 @@ export const useWorkflowStore = defineStore('workflow', () => {
       if (throwOnError) throw error
       return null
     })
-    const loadedWorkflows = (stored?.workflows || [])
-      .map(item => normalizeWorkflow(item))
-      .filter((item): item is WorkflowEntry => Boolean(item))
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-    const storedSelectedId = String(stored?.selectedWorkflowId || '')
-    const loadedSelectedId = loadedWorkflows.some(item => item.id === storedSelectedId)
-      ? storedSelectedId
-      : loadedWorkflows[0]?.id || ''
-    return { workflows: loadedWorkflows, selectedWorkflowId: loadedSelectedId }
+    return normalizeStoredState(stored)
+  }
+
+  function findMutationWorkflowIndex(workflowsToSearch: WorkflowEntry[], mutation: WorkflowStoreMutation) {
+    const workflowId = mutation.entry?.id || mutation.workflowId || ''
+    const exactIndex = workflowsToSearch.findIndex(item => item.id === workflowId)
+    if (exactIndex >= 0) return exactIndex
+    if (mutation.legacyIndex === undefined && !mutation.legacyEntry) return -1
+    const legacyId = [...legacyWorkflowReferences.entries()].find(([, reference]) => (
+      (mutation.legacyIndex === undefined || reference.index === mutation.legacyIndex)
+      && (!mutation.legacyEntry
+        || JSON.stringify(reference.entry) === JSON.stringify(mutation.legacyEntry))
+    ))?.[0]
+    return legacyId ? workflowsToSearch.findIndex(item => item.id === legacyId) : -1
+  }
+
+  async function mutateStoredState(mutation: WorkflowStoreMutation): Promise<WorkflowMutationResponse> {
+    if (isTauriRuntime()) {
+      return invoke<WorkflowMutationResponse>('mutate_workflow_store', { payload: mutation })
+    }
+
+    const current = await readStoredState(true)
+    const next: LoadedWorkflowState = {
+      workflows: current.workflows.map(item => JSON.parse(JSON.stringify(item)) as WorkflowEntry),
+      selectedWorkflowId: current.selectedWorkflowId,
+    }
+    if (mutation.action === 'upsert' && mutation.entry) {
+      const index = findMutationWorkflowIndex(next.workflows, mutation)
+      const legacyTargetMismatch = index < 0
+        && (mutation.legacyIndex !== undefined || Boolean(mutation.legacyEntry))
+      const existing = index >= 0 ? next.workflows[index] : null
+      const actualUpdatedAt = existing?.updatedAt || 0
+      if (
+        !mutation.force
+        && (legacyTargetMismatch
+          || (mutation.expectedUpdatedAt !== undefined
+            && mutation.expectedUpdatedAt !== actualUpdatedAt))
+      ) {
+        return {
+          state: next,
+          conflict: {
+            workflowId: mutation.entry.id,
+            expectedUpdatedAt: mutation.expectedUpdatedAt ?? 0,
+            actualUpdatedAt,
+          },
+        }
+      }
+      const entry = {
+        ...mutation.entry,
+        createdAt: existing?.createdAt || mutation.entry.createdAt,
+        updatedAt: Math.max(mutation.entry.updatedAt, actualUpdatedAt + 1),
+      }
+      if (index >= 0) next.workflows.splice(index, 1, entry)
+      else next.workflows.push(entry)
+      next.workflows.sort((a, b) => b.updatedAt - a.updatedAt)
+      next.selectedWorkflowId = entry.id
+    } else if (mutation.action === 'delete') {
+      const index = findMutationWorkflowIndex(next.workflows, mutation)
+      const actualUpdatedAt = index >= 0 ? next.workflows[index].updatedAt : 0
+      if (
+        (index < 0 && (mutation.legacyIndex !== undefined || mutation.legacyEntry))
+        || (mutation.expectedUpdatedAt !== undefined
+          && mutation.expectedUpdatedAt !== actualUpdatedAt)
+      ) {
+        return {
+          state: next,
+          conflict: {
+            workflowId: mutation.workflowId || '',
+            expectedUpdatedAt: mutation.expectedUpdatedAt ?? 0,
+            actualUpdatedAt,
+          },
+        }
+      }
+      if (index >= 0) {
+        const [removed] = next.workflows.splice(index, 1)
+        if (next.selectedWorkflowId === removed.id || next.selectedWorkflowId === mutation.workflowId) {
+          next.selectedWorkflowId = next.workflows[0]?.id || ''
+        }
+      }
+    } else if (mutation.action === 'select') {
+      if (!mutation.workflowId) {
+        next.selectedWorkflowId = ''
+      } else {
+        const index = findMutationWorkflowIndex(next.workflows, mutation)
+        if (index < 0 && (mutation.legacyIndex !== undefined || mutation.legacyEntry)) {
+          return {
+            state: next,
+            conflict: {
+              workflowId: mutation.workflowId,
+              expectedUpdatedAt: 0,
+              actualUpdatedAt: 0,
+            },
+          }
+        }
+        if (index >= 0) {
+          next.workflows[index].id = mutation.workflowId
+          next.selectedWorkflowId = mutation.workflowId
+        }
+      }
+    }
+    const stored: StoredWorkflowState = JSON.parse(JSON.stringify(next)) as StoredWorkflowState
+    await saveAppStore('workflow-state', stored)
+    return { state: stored }
   }
 
   function applyStoredState(state: LoadedWorkflowState) {
     workflows.value = state.workflows
     selectedWorkflowId.value = state.selectedWorkflowId
     initialized.value = true
+  }
+
+  function normalizeMutationState(
+    stored: StoredWorkflowState,
+    selectionGenerationAtRequest: number,
+  ) {
+    const latest = normalizeStoredState(stored)
+    if (selectionGenerationAtRequest !== selectionMutationGeneration) {
+      const currentId = selectedWorkflowId.value
+      if (!currentId || latest.workflows.some(item => item.id === currentId)) {
+        latest.selectedWorkflowId = currentId
+      }
+    }
+    return latest
   }
 
   async function loadStoredState(throwOnError = false) {
@@ -190,51 +339,74 @@ export const useWorkflowStore = defineStore('workflow', () => {
   }
 
   async function saveWorkflow(input: SaveWorkflowInput) {
-    const existing = input.id ? workflows.value.find(item => item.id === input.id) : null
-    if (input.id && input.expectedUpdatedAt !== undefined && !existing && !input.force) {
-      throw new WorkflowRevisionConflictError(input.id, input.expectedUpdatedAt, 0)
-    }
-    if (
-      existing
-      && input.expectedUpdatedAt !== undefined
-      && input.expectedUpdatedAt !== existing.updatedAt
-      && !input.force
-    ) {
-      throw new WorkflowRevisionConflictError(existing.id, input.expectedUpdatedAt, existing.updatedAt)
-    }
-    const now = Math.max(Date.now(), (existing?.updatedAt || 0) + 1)
-    const definition = normalizeDefinition(input.definition)
-    const detectedFormat = detectWorkflowFormat(definition)
-    const entry: WorkflowEntry = {
-      id: existing?.id || input.id || createId(),
-      name: input.name.trim(),
-      description: String(input.description || '').trim(),
-      definition,
-      format: detectedFormat === 'unknown'
-        ? (input.format || existing?.format || 'unknown')
-        : detectedFormat,
-      formatVersion: Number.isFinite(Number(input.formatVersion))
-        ? Number(input.formatVersion)
-        : existing?.formatVersion || WORKFLOW_FORMAT_VERSION,
-      createdAt: existing?.createdAt || now,
-      updatedAt: now,
-    }
-    if (!entry.name) throw new Error('Workflow name is required')
-    const index = workflows.value.findIndex(item => item.id === entry.id)
-    if (index >= 0) workflows.value.splice(index, 1, entry)
-    else workflows.value.unshift(entry)
-    workflows.value.sort((a, b) => b.updatedAt - a.updatedAt)
-    selectedWorkflowId.value = entry.id
-    await persist()
-    return entry
+    const selectionGenerationAtRequest = selectionMutationGeneration
+    const legacyReference = input.id ? legacyWorkflowReferences.get(input.id) : undefined
+    return queueMutation(async () => {
+      const existing = input.id ? workflows.value.find(item => item.id === input.id) : null
+      const now = Math.max(Date.now(), (existing?.updatedAt || 0) + 1)
+      const definition = normalizeDefinition(input.definition)
+      const detectedFormat = detectWorkflowFormat(definition)
+      const entry: WorkflowEntry = {
+        id: existing?.id || input.id || createId(),
+        name: input.name.trim(),
+        description: String(input.description || '').trim(),
+        definition,
+        format: detectedFormat === 'unknown'
+          ? (input.format || existing?.format || 'unknown')
+          : detectedFormat,
+        formatVersion: Number.isFinite(Number(input.formatVersion))
+          ? Number(input.formatVersion)
+          : existing?.formatVersion || WORKFLOW_FORMAT_VERSION,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+      }
+      if (!entry.name) throw new Error('Workflow name is required')
+      const response = await mutateStoredState({
+        action: 'upsert',
+        entry,
+        expectedUpdatedAt: input.expectedUpdatedAt,
+        legacyIndex: legacyReference?.index,
+        legacyEntry: legacyReference?.entry,
+        force: input.force,
+      })
+      const latest = normalizeMutationState(response.state, selectionGenerationAtRequest)
+      applyStoredState(latest)
+      if (response.conflict) {
+        throw new WorkflowRevisionConflictError(
+          response.conflict.workflowId,
+          response.conflict.expectedUpdatedAt,
+          response.conflict.actualUpdatedAt,
+        )
+      }
+      const saved = workflows.value.find(item => item.id === entry.id)
+      if (!saved) throw new Error('Saved workflow is missing from persistent state')
+      return saved
+    })
   }
 
   async function deleteWorkflow(id: string) {
-    workflows.value = workflows.value.filter(item => item.id !== id)
-    if (selectedWorkflowId.value === id) selectedWorkflowId.value = workflows.value[0]?.id || ''
-    if (nodeEditorOpenWorkflowId.value === id) nodeEditorOpenWorkflowId.value = ''
-    if (simpleEditorOpenWorkflowId.value === id) simpleEditorOpenWorkflowId.value = ''
-    await persist()
+    const selectionGenerationAtRequest = selectionMutationGeneration
+    const expectedUpdatedAt = workflows.value.find(item => item.id === id)?.updatedAt
+    const legacyReference = legacyWorkflowReferences.get(id)
+    await queueMutation(async () => {
+      const response = await mutateStoredState({
+        action: 'delete',
+        workflowId: id,
+        expectedUpdatedAt,
+        legacyIndex: legacyReference?.index,
+        legacyEntry: legacyReference?.entry,
+      })
+      applyStoredState(normalizeMutationState(response.state, selectionGenerationAtRequest))
+      if (response.conflict) {
+        throw new WorkflowRevisionConflictError(
+          response.conflict.workflowId,
+          response.conflict.expectedUpdatedAt,
+          response.conflict.actualUpdatedAt,
+        )
+      }
+      if (nodeEditorOpenWorkflowId.value === id) nodeEditorOpenWorkflowId.value = ''
+      if (simpleEditorOpenWorkflowId.value === id) simpleEditorOpenWorkflowId.value = ''
+    })
   }
 
   async function duplicateWorkflow(id: string) {
@@ -250,8 +422,30 @@ export const useWorkflowStore = defineStore('workflow', () => {
   }
 
   function selectWorkflow(id: string) {
-    selectedWorkflowId.value = workflows.value.some(item => item.id === id) ? id : ''
-    void persist()
+    const nextId = workflows.value.some(item => item.id === id) ? id : ''
+    const generation = ++selectionMutationGeneration
+    const legacyReference = legacyWorkflowReferences.get(nextId)
+    selectedWorkflowId.value = nextId
+    void queueMutation(async () => {
+      const response = await mutateStoredState({
+        action: 'select',
+        workflowId: nextId,
+        legacyIndex: legacyReference?.index,
+        legacyEntry: legacyReference?.entry,
+      })
+      const latest = normalizeMutationState(response.state, generation)
+      if (generation === selectionMutationGeneration && !nextId) latest.selectedWorkflowId = ''
+      applyStoredState(latest)
+      if (response.conflict) {
+        throw new WorkflowRevisionConflictError(
+          response.conflict.workflowId,
+          response.conflict.expectedUpdatedAt,
+          response.conflict.actualUpdatedAt,
+        )
+      }
+    }).catch((error) => {
+      console.warn('Failed to persist workflow selection:', error)
+    })
   }
 
   function markNodeEditorOpen(workflowId: string) {
