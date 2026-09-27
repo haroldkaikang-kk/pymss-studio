@@ -1164,7 +1164,7 @@ watch([workflows, selectedWorkflowId], () => {
   background: color-mix(in srgb, var(--surface-1) 78%, transparent);
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--outline) 80%, transparent),
-    0 18px 46px rgba(0, 0, 0, 0.06);
+    var(--shadow-panel);
 }
 
 .wf-list-head {
@@ -1415,7 +1415,7 @@ watch([workflows, selectedWorkflowId], () => {
   background: color-mix(in srgb, var(--surface-1) 78%, transparent);
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--outline) 80%, transparent),
-    0 18px 46px rgba(0, 0, 0, 0.06);
+    var(--shadow-panel);
   overflow: hidden;
 }
 

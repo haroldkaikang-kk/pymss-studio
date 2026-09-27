@@ -2098,10 +2098,8 @@ onMounted(() => {
 }
 
 .model-card--selected {
-  border-color: color-mix(in srgb, var(--primary) 48%, var(--outline)) !important;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--primary-soft) 18%, transparent), transparent 72%),
-    color-mix(in srgb, var(--surface-2) 48%, transparent);
+  border-color: color-mix(in srgb, var(--outline-strong) 72%, transparent) !important;
+  background: color-mix(in srgb, var(--surface-2) 58%, var(--surface-1));
 }
 
 .model-card--unsupported {

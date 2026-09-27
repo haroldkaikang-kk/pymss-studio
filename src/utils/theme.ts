@@ -21,12 +21,15 @@ type SurfacePalette = {
   surface1: string
   surface2: string
   surface3: string
+  onSurfaceHeading: string
   onSurface: string
   onSurfaceMuted: string
   outline: string
+  outlineStrong: string
   success: string
   warning: string
   danger: string
+  shadowPanel: string
   shadowSoft: string
 }
 
@@ -46,21 +49,22 @@ const RIPPLE_TRANSITION_DURATION = 700
 const RIPPLE_TRANSITION_EASING = 'cubic-bezier(0.2, 0, 0, 1)'
 
 const DARK_SURFACE: SurfacePalette = {
-  // Match the familiar desktop-app dark hierarchy: the canvas and cards share one neutral
-  // plane, while controls lift one level. It avoids the "stack of dark boxes" effect.
-  surface: '#18181b',
-  surface1: '#18181b',
-  surface2: '#27272a',
-  surface3: '#3f3f46',
-  // Use a softened neutral white instead of pure white. The lower contrast stays readable
-  // against the zinc surfaces while preventing long model lists from looking overexposed.
-  onSurface: '#dedee5',
-  onSurfaceMuted: '#92929c',
-  outline: 'rgba(255, 255, 255, 0.10)',
-  success: '#79a992',
-  warning: '#c8a66d',
-  danger: '#c9828c',
-  shadowSoft: '0 14px 36px rgba(0, 0, 0, 0.28)',
+  // A cool graphite stack gives the workstation a visible canvas, panel and control hierarchy
+  // without falling back to pure black. The small hue shift keeps large dense pages calm.
+  surface: '#0f1117',
+  surface1: '#161922',
+  surface2: '#1e232e',
+  surface3: '#2a313f',
+  onSurfaceHeading: '#eef1f7',
+  onSurface: '#cdd2dc',
+  onSurfaceMuted: '#969eae',
+  outline: 'rgba(190, 201, 222, 0.115)',
+  outlineStrong: 'rgba(205, 214, 232, 0.19)',
+  success: '#7fb59a',
+  warning: '#d0ab70',
+  danger: '#d7808f',
+  shadowPanel: '0 18px 46px rgba(3, 5, 12, 0.18)',
+  shadowSoft: '0 18px 54px rgba(3, 5, 12, 0.36)',
 }
 
 const LIGHT_SURFACE: SurfacePalette = {
@@ -68,12 +72,15 @@ const LIGHT_SURFACE: SurfacePalette = {
   surface1: '#fbfcff',
   surface2: '#eef2f7',
   surface3: '#dfe5ee',
+  onSurfaceHeading: '#172033',
   onSurface: '#172033',
   onSurfaceMuted: '#596579',
   outline: 'rgba(31, 42, 68, 0.13)',
+  outlineStrong: 'rgba(31, 42, 68, 0.22)',
   success: '#2e7d58',
   warning: '#9a6b00',
   danger: '#b4233a',
+  shadowPanel: '0 18px 46px rgba(33, 43, 67, 0.07)',
   shadowSoft: '0 20px 70px rgba(33, 43, 67, 0.11)',
 }
 
@@ -244,9 +251,11 @@ function applyThemeTokens(mode: ThemeMode, accent: ThemeAccent) {
   style.setProperty('--surface-1', tokens.surface1)
   style.setProperty('--surface-2', tokens.surface2)
   style.setProperty('--surface-3', tokens.surface3)
+  style.setProperty('--on-surface-heading', tokens.onSurfaceHeading)
   style.setProperty('--on-surface', tokens.onSurface)
   style.setProperty('--on-surface-muted', tokens.onSurfaceMuted)
   style.setProperty('--outline', tokens.outline)
+  style.setProperty('--outline-strong', tokens.outlineStrong)
   style.setProperty('--primary', tokens.primary)
   style.setProperty('--primary-strong', tokens.primaryStrong)
   style.setProperty('--primary-soft', tokens.primarySoft)
@@ -256,6 +265,7 @@ function applyThemeTokens(mode: ThemeMode, accent: ThemeAccent) {
   style.setProperty('--success', tokens.success)
   style.setProperty('--warning', tokens.warning)
   style.setProperty('--danger', tokens.danger)
+  style.setProperty('--shadow-panel', tokens.shadowPanel)
   style.setProperty('--shadow-soft', tokens.shadowSoft)
 }
 

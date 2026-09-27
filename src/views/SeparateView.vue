@@ -3144,7 +3144,8 @@ async function retryCurrentTask() {
   background: color-mix(in srgb, var(--surface-1) 78%, transparent);
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--outline) 80%, transparent),
-    inset 0 1px 0 rgba(255,255,255,0.03);
+    inset 0 1px 0 rgba(255,255,255,0.03),
+    var(--shadow-panel);
 }
 
 .rail-card--output {
@@ -3748,17 +3749,19 @@ async function retryCurrentTask() {
     color-mix(in srgb, var(--surface-1) 74%, transparent);
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--outline) 76%, transparent),
-    inset 0 1px 0 rgba(255,255,255,0.03);
+    inset 0 1px 0 rgba(255,255,255,0.03),
+    var(--shadow-panel);
 }
 
 .stage-view--running {
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--primary-border) 48%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--primary-glow) 16%, transparent);
+    0 0 0 1px color-mix(in srgb, var(--primary-glow) 16%, transparent),
+    var(--shadow-panel);
 }
-.stage-view--done { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--success) 40%, transparent); }
-.stage-view--failed { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 40%, transparent); }
-.stage-view--cancelled { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 40%, transparent); }
+.stage-view--done { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--success) 40%, transparent), var(--shadow-panel); }
+.stage-view--failed { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 40%, transparent), var(--shadow-panel); }
+.stage-view--cancelled { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 40%, transparent), var(--shadow-panel); }
 
 .stage-swap-enter-active { transition: opacity 260ms cubic-bezier(0.22,1,0.36,1), transform 300ms cubic-bezier(0.22,1,0.36,1); }
 .stage-swap-leave-active { transition: opacity 160ms ease, transform 160ms ease; }
@@ -4031,15 +4034,12 @@ async function retryCurrentTask() {
 
 .target-row:hover {
   background: color-mix(in srgb, var(--surface-2) 62%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-border) 40%, transparent);
+  box-shadow: inset 0 0 0 1px var(--outline-strong);
 }
 
 .target-row--active {
-  background:
-    linear-gradient(90deg, color-mix(in srgb, var(--primary-soft) 42%, transparent), color-mix(in srgb, var(--surface-2) 52%, transparent) 60%);
-  box-shadow:
-    inset 0 0 0 1.5px color-mix(in srgb, var(--primary) 54%, transparent),
-    0 8px 22px color-mix(in srgb, var(--primary-glow) 18%, transparent);
+  background: color-mix(in srgb, var(--surface-2) 82%, var(--surface-1));
+  box-shadow: inset 0 0 0 1px var(--outline-strong);
 }
 
 .target-row--unavailable,
@@ -4088,7 +4088,7 @@ async function retryCurrentTask() {
   font-weight: 600;
   letter-spacing: -0.01em;
 }
-.target-row--active .target-row__name { color: var(--primary-strong); }
+.target-row--active .target-row__name { color: var(--on-surface); }
 
 .target-row__unavailable {
   flex: 0 0 auto;
