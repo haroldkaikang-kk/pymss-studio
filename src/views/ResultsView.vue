@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
+  CheckmarkOutline,
   ChevronDownOutline,
   FolderOpenOutline,
   FolderOutline,
@@ -93,8 +94,26 @@ const {
 } = pagedSelection
 const pagedResults = computed(() => pagedSelection.pagedItems.value)
 
+const RESULT_DRAG_HOLD_MS = 260
+type ResultDragSelection = {
+  pointerId: number
+  startId: string
+  lastId: string
+  targetSelected: boolean
+  active: boolean
+  visited: Set<string>
+}
+
+let resultDragSelection: ResultDragSelection | null = null
+let resultDragTimer: ReturnType<typeof setTimeout> | null = null
+let suppressNextResultClick = false
+
 watch([search, sortBy, pageSize], () => {
   page.value = 1
+})
+
+watch(selecting, (value) => {
+  if (!value) finishResultDragSelection()
 })
 
 function getFileName(path: string) {
@@ -497,6 +516,95 @@ function handleClearResults() {
   })
 }
 
+function setResultSelected(id: string, selected: boolean) {
+  if (selectedResultSet.value.has(id) !== selected) toggleResultSelection(id)
+}
+
+function applyResultDragSelection(id: string) {
+  const state = resultDragSelection
+  if (!state?.active || state.visited.has(id)) return
+  state.visited.add(id)
+  setResultSelected(id, state.targetSelected)
+}
+
+function activateResultDragSelection() {
+  const state = resultDragSelection
+  if (!state || state.active) return
+  state.active = true
+  if (!selecting.value) selecting.value = true
+  document.documentElement.classList.add('results-drag-selecting')
+  applyResultDragSelection(state.startId)
+  applyResultDragSelection(state.lastId)
+}
+
+function handleResultIconPointerDown(event: PointerEvent, id: string) {
+  if (event.pointerType !== 'mouse' || event.button !== 0) return
+  event.preventDefault()
+  finishResultDragSelection()
+  window.getSelection()?.removeAllRanges()
+  resultDragSelection = {
+    pointerId: event.pointerId,
+    startId: id,
+    lastId: id,
+    targetSelected: selecting.value ? !selectedResultSet.value.has(id) : true,
+    active: false,
+    visited: new Set(),
+  }
+  resultDragTimer = setTimeout(activateResultDragSelection, RESULT_DRAG_HOLD_MS)
+}
+
+function handleResultIconPointerEnter(event: PointerEvent, id: string) {
+  if (!resultDragSelection) return
+  if ((event.buttons & 1) === 0) {
+    finishResultDragSelection()
+    return
+  }
+  resultDragSelection.lastId = id
+  applyResultDragSelection(id)
+}
+
+function finishResultDragSelection(event?: PointerEvent) {
+  const state = resultDragSelection
+  if (!state || (event && event.pointerId !== state.pointerId)) return
+  if (resultDragTimer) {
+    clearTimeout(resultDragTimer)
+    resultDragTimer = null
+  }
+  if (state.active) {
+    suppressNextResultClick = true
+    window.setTimeout(() => { suppressNextResultClick = false }, 0)
+  }
+  resultDragSelection = null
+  document.documentElement.classList.remove('results-drag-selecting')
+}
+
+function hasSelectedResultText() {
+  const selection = window.getSelection()
+  return Boolean(selection && !selection.isCollapsed && selection.toString())
+}
+
+function handleResultRowClick(id: string) {
+  if (suppressNextResultClick) {
+    suppressNextResultClick = false
+    return
+  }
+  if (hasSelectedResultText()) return
+  if (selecting.value) toggleResultSelection(id)
+  else toggleExpanded(id)
+}
+
+function handleResultsKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.key !== 'Escape' || !selecting.value) return
+  if (document.querySelector('[role="dialog"], .n-modal-mask')) return
+  event.preventDefault()
+  finishResultDragSelection()
+  toggleSelecting()
+}
+
+function handleResultsWindowBlur() {
+  finishResultDragSelection()
+}
+
 function isExpanded(id: string) {
   return expandedIds.value.includes(id)
 }
@@ -542,11 +650,23 @@ watch(() => task.focusedResultTaskId, (value) => {
 })
 
 onMounted(() => {
+  window.addEventListener('keydown', handleResultsKeydown)
+  window.addEventListener('pointerup', finishResultDragSelection)
+  window.addEventListener('pointercancel', finishResultDragSelection)
+  window.addEventListener('blur', handleResultsWindowBlur)
   void refreshOrphanedEditorProjects()
   if (task.focusedResultTaskId) {
     scrollToFocusedResult(task.focusedResultTaskId)
     task.focusResultTask(null)
   }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleResultsKeydown)
+  window.removeEventListener('pointerup', finishResultDragSelection)
+  window.removeEventListener('pointercancel', finishResultDragSelection)
+  window.removeEventListener('blur', handleResultsWindowBlur)
+  finishResultDragSelection()
 })
 
 function formatTime(value: number) {
@@ -572,30 +692,59 @@ function formatDurationMs(value: number | undefined) {
         <h1>{{ t('results.title') }}</h1>
         <p>{{ t('results.subtitle') }}</p>
       </div>
-      <div class="results-page__header-actions">
-        <n-button
-          v-if="orphanedEditorProjects.length"
-          secondary
-          type="warning"
-          :loading="orphanedProjectsCleaning"
-          @click="handleCleanupOrphanedEditorProjects"
-        >
-          <template #icon><n-icon :component="TrashOutline" /></template>
-          {{ t('results.cleanupEditorProjectsAction') }}
-          <span class="results-page__cleanup-count">{{ orphanedEditorProjects.length }}</span>
-        </n-button>
-        <n-button v-if="task.resultTasks.length" secondary @click="toggleSelecting">
-          {{ selecting ? t('results.batchExit') : t('results.batchSelect') }}
-        </n-button>
-        <n-button
-          v-if="task.resultTasks.length"
-          secondary
-          type="error"
-          @click="handleClearResults"
-        >
-          <template #icon><n-icon :component="TrashOutline" /></template>
-          {{ t('results.clearAction') }}
-        </n-button>
+      <div
+        class="results-page__header-actions"
+        :class="{ 'results-page__header-actions--selecting': selecting }"
+      >
+        <template v-if="selecting">
+          <n-checkbox
+            :checked="allResultsSelected"
+            :indeterminate="someResultsSelected"
+            @update:checked="toggleSelectAllResults"
+          >
+            {{ t('results.selectPage') }}
+          </n-checkbox>
+          <span class="results-page__selection-count" aria-live="polite">
+            {{ t('results.selectedCount', { count: selectedResultIds.length }) }}
+          </span>
+          <n-button
+            secondary
+            type="error"
+            :disabled="!selectedResultIds.length"
+            @click="handleRemoveSelected"
+          >
+            <template #icon><n-icon :component="TrashOutline" /></template>
+            {{ t('results.removeSelectedCount', { count: selectedResultIds.length }) }}
+          </n-button>
+          <n-button secondary @click="toggleSelecting">
+            {{ t('results.batchExit') }}
+          </n-button>
+        </template>
+        <template v-else>
+          <n-button
+            v-if="orphanedEditorProjects.length"
+            secondary
+            type="warning"
+            :loading="orphanedProjectsCleaning"
+            @click="handleCleanupOrphanedEditorProjects"
+          >
+            <template #icon><n-icon :component="TrashOutline" /></template>
+            {{ t('results.cleanupEditorProjectsAction') }}
+            <span class="results-page__cleanup-count">{{ orphanedEditorProjects.length }}</span>
+          </n-button>
+          <n-button v-if="task.resultTasks.length" secondary @click="toggleSelecting">
+            {{ t('results.batchSelect') }}
+          </n-button>
+          <n-button
+            v-if="task.resultTasks.length"
+            secondary
+            type="error"
+            @click="handleClearResults"
+          >
+            <template #icon><n-icon :component="TrashOutline" /></template>
+            {{ t('results.clearAction') }}
+          </n-button>
+        </template>
       </div>
     </div>
 
@@ -621,26 +770,6 @@ function formatDurationMs(value: number | undefined) {
       <span class="results-toolbar__count">{{ filteredResults.length }} / {{ resultGroups.length }}</span>
     </div>
 
-    <div v-if="selecting && filteredResults.length" class="results-batchbar">
-      <n-checkbox
-        :checked="allResultsSelected"
-        :indeterminate="someResultsSelected"
-        @update:checked="toggleSelectAllResults"
-      >
-        {{ t('results.selectPage') }}
-      </n-checkbox>
-      <span class="results-batchbar__count">{{ t('results.selectedCount', { count: selectedResultIds.length }) }}</span>
-      <n-button
-        size="small"
-        type="error"
-        :disabled="!selectedResultIds.length"
-        @click="handleRemoveSelected"
-      >
-        <template #icon><n-icon :component="TrashOutline" /></template>
-        {{ t('results.removeSelected') }}
-      </n-button>
-    </div>
-
     <div v-if="!task.resultTasks.length" class="results-empty">
       <n-icon :component="FolderOutline" size="46" />
       <strong>{{ t('results.empty') }}</strong>
@@ -659,33 +788,48 @@ function formatDurationMs(value: number | undefined) {
         :id="resultCardId(item)"
         :key="item.id"
         class="result-row"
-        :class="{ 'result-row--selectable': selecting, 'result-row--selected': selectedResultSet.has(item.id) }"
+        :class="{ 'result-row--selected': selectedResultSet.has(item.id) }"
       >
-        <n-checkbox
-          v-if="selecting"
-          class="result-row__check"
-          :checked="selectedResultSet.has(item.id)"
-          @update:checked="toggleResultSelection(item.id)"
-          @click.stop
-        />
-        <button class="result-row__main" type="button" @click="selecting ? toggleResultSelection(item.id) : toggleExpanded(item.id)">
-          <span class="result-row__icon">
-            <n-icon :component="DocumentTextOutline" size="18" />
+        <button
+          class="result-row__main"
+          :class="{ 'result-row__main--selecting': selecting }"
+          :aria-pressed="selecting ? selectedResultSet.has(item.id) : undefined"
+          type="button"
+          @click="handleResultRowClick(item.id)"
+        >
+          <span
+            class="result-row__icon"
+            @pointerdown="handleResultIconPointerDown($event, item.id)"
+            @pointerenter="handleResultIconPointerEnter($event, item.id)"
+          >
+            <span
+              v-if="selecting"
+              class="result-row__selection-marker"
+              :class="{ 'result-row__selection-marker--checked': selectedResultSet.has(item.id) }"
+              aria-hidden="true"
+            >
+              <n-icon v-if="selectedResultSet.has(item.id)" :component="CheckmarkOutline" size="14" />
+            </span>
+            <n-icon v-else :component="DocumentTextOutline" size="18" />
           </span>
 
           <span class="result-row__body">
-            <strong>{{ getGroupTitle(item) }}</strong>
+            <strong data-result-text>{{ getGroupTitle(item) }}</strong>
             <span class="result-row__meta">
-              <span class="result-row__model" :title="groupTaskIdTitle(item)">{{ item.model }}</span>
-              <span>{{ item.inputCount }} {{ t('results.inputUnit') }}</span>
-              <span>{{ item.outputCount }} {{ t('results.stemUnit') }}</span>
-              <span>{{ formatDurationMs(item.durationMs) }}</span>
-              <span class="result-row__time"><n-icon :component="TimeOutline" /> {{ formatTime(item.updatedAt) }}</span>
+              <span data-result-text class="result-row__model" :title="groupTaskIdTitle(item)">{{ item.model }}</span>
+              <span data-result-text>{{ item.inputCount }} {{ t('results.inputUnit') }}</span>
+              <span data-result-text>{{ item.outputCount }} {{ t('results.stemUnit') }}</span>
+              <span data-result-text>{{ formatDurationMs(item.durationMs) }}</span>
+              <span data-result-text class="result-row__time"><n-icon :component="TimeOutline" /> {{ formatTime(item.updatedAt) }}</span>
             </span>
-            <span class="result-row__path">{{ shortenPath(item.output) }}</span>
+            <span data-result-text class="result-row__path">{{ shortenPath(item.output) }}</span>
           </span>
 
-          <span class="result-row__toggle" :class="{ 'result-row__toggle--open': isExpanded(item.id) }">
+          <span
+            v-if="!selecting"
+            class="result-row__toggle"
+            :class="{ 'result-row__toggle--open': isExpanded(item.id) }"
+          >
             <n-icon :component="ChevronDownOutline" />
           </span>
         </button>
@@ -770,6 +914,20 @@ function formatDurationMs(value: number | undefined) {
   gap: 8px;
 }
 
+.results-page__header-actions--selecting {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--primary-border) 52%, var(--outline));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--primary-softer) 42%, var(--surface-1));
+}
+
+.results-page__selection-count {
+  min-width: 72px;
+  color: var(--on-surface-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
 .result-remove__editor-hint {
   color: var(--on-surface-muted);
   font-size: 12px;
@@ -816,22 +974,6 @@ function formatDurationMs(value: number | undefined) {
   justify-content: flex-end;
 }
 
-.results-batchbar {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 10px 14px;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--primary-border) 60%, var(--outline));
-  background: var(--primary-softer);
-}
-
-.results-batchbar__count {
-  margin-right: auto;
-  font-size: 13px;
-  color: var(--on-surface-muted);
-}
-
 .result-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -846,17 +988,9 @@ function formatDurationMs(value: number | undefined) {
   transition: border-color 160ms ease, background 160ms ease;
 }
 
-.result-row--selectable {
-  grid-template-columns: auto minmax(0, 1fr);
-}
-
 .result-row--selected {
-  border-color: color-mix(in srgb, var(--primary-border) 90%, transparent);
-  background: var(--primary-softer);
-}
-
-.result-row__check {
-  flex-shrink: 0;
+  border-color: color-mix(in srgb, var(--primary-border) 76%, transparent);
+  background: color-mix(in srgb, var(--primary-softer) 48%, var(--surface-1));
 }
 
 .result-row:hover {
@@ -864,6 +998,11 @@ function formatDurationMs(value: number | undefined) {
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--primary-soft) 10%, transparent), transparent 58%),
     color-mix(in srgb, var(--surface-1) 74%, transparent);
+}
+
+.result-row--selected:hover {
+  border-color: color-mix(in srgb, var(--primary-border) 88%, transparent);
+  background: color-mix(in srgb, var(--primary-softer) 58%, var(--surface-1));
 }
 
 .result-row__main {
@@ -880,6 +1019,10 @@ function formatDurationMs(value: number | undefined) {
   cursor: pointer;
 }
 
+.result-row__main--selecting {
+  grid-template-columns: 36px minmax(0, 1fr);
+}
+
 .result-row__icon {
   width: 36px;
   height: 36px;
@@ -888,6 +1031,24 @@ function formatDurationMs(value: number | undefined) {
   border-radius: 11px;
   color: color-mix(in srgb, var(--primary-strong) 78%, var(--on-surface-muted));
   background: color-mix(in srgb, var(--primary-soft) 34%, var(--surface-2));
+}
+
+.result-row__selection-marker {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--outline) 78%, transparent);
+  border-radius: 999px;
+  color: transparent;
+  background: var(--surface-1);
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.result-row__selection-marker--checked {
+  border-color: var(--primary-strong);
+  color: var(--on-primary, #fff);
+  background: var(--primary-strong);
 }
 
 .result-row__body {
@@ -904,6 +1065,11 @@ function formatDurationMs(value: number | undefined) {
   line-height: 1.25;
 }
 
+[data-result-text] {
+  cursor: text;
+  user-select: text;
+}
+
 .result-row__path {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -911,6 +1077,12 @@ function formatDurationMs(value: number | undefined) {
   color: var(--on-surface-muted);
   font-size: 11px;
   font-family: inherit;
+}
+
+:global(html.results-drag-selecting),
+:global(html.results-drag-selecting *) {
+  cursor: crosshair !important;
+  user-select: none !important;
 }
 
 .result-row__meta {
