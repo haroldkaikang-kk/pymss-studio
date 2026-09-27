@@ -30,6 +30,7 @@ import {
 } from '@vicons/ionicons5'
 import { useTaskStore, type ModelListSortMode, type OutputLayout, type SeparationJob, type SeparationTask, type StemOutput } from '@/stores/task'
 import { resolveJobStatus } from '@/features/tasks/lifecycle'
+import { resolveInferenceSampleStep } from '@/features/inference/sampleStep'
 import { useWorkflowStore, type WorkflowEntry } from '@/stores/workflow'
 import { WORKFLOW_FORMAT_VERSION } from '@/workflows/formats'
 import {
@@ -45,6 +46,7 @@ import { sortStemOutputsByOrder } from '@/utils/stemOrder'
 import { retainAvailableModelNames } from '@/utils/modelSource'
 import { SEPARATE_MODEL_PAGE_SIZES } from '@/utils/pagination'
 import AppBrandMark from '@/components/AppBrandMark.vue'
+import AlignedInferenceInputNumber from '@/components/AlignedInferenceInputNumber.vue'
 
 const { t, locale } = useI18n()
 const message = useMessage()
@@ -223,6 +225,18 @@ const currentModelInfo = computed(() => {
   if (model.selectedInfo?.name === selectedModelName.value) return model.selectedInfo
   return selectedModelListItem.value
 })
+const currentInferenceSampleStep = computed(() => currentModelInfo.value?.inferenceParamMeta?.recommendedSampleStep)
+const overlapSizeStep = computed(() => resolveInferenceSampleStep(currentModelInfo.value?.inferenceParamMeta, 1))
+const chunkSizeStep = computed(() => resolveInferenceSampleStep(currentModelInfo.value?.inferenceParamMeta, 1024))
+
+function updateOverlapSize(value: number | null) {
+  overlap_size.value = value
+}
+
+function updateChunkSize(value: number | null) {
+  chunk_size.value = value
+}
+
 const currentModelDefaults = computed(() => currentModelInfo.value?.defaultInferenceParams || {})
 const currentModelDefaultsResolved = computed(() => Boolean(currentModelInfo.value?.defaultInferenceParamsResolved))
 const currentModelType = computed(() => String(currentModelInfo.value?.modelType || '').trim().toLowerCase())
@@ -2700,7 +2714,7 @@ async function retryCurrentTask() {
                   <n-grid-item v-if="hasInferenceField('overlap_size')">
                     <div class="field-block">
                       <label>{{ t('inference.overlapSize') }}</label>
-                      <n-input-number v-model:value="overlap_size" :min="0" :max="1048576" style="width:100%" @blur="task.restoreInferenceNumberFallback('overlap_size')" />
+                      <AlignedInferenceInputNumber :value="overlap_size" :step="overlapSizeStep" :alignment-step="currentInferenceSampleStep" @update:value="updateOverlapSize" @blur="task.restoreInferenceNumberFallback('overlap_size')" />
                     </div>
                   </n-grid-item>
                   <n-grid-item v-if="hasInferenceField('num_overlap')">
@@ -2712,7 +2726,7 @@ async function retryCurrentTask() {
                   <n-grid-item v-if="hasInferenceField('chunk_size')">
                     <div class="field-block">
                       <label>{{ t('inference.chunkSize') }}</label>
-                      <n-input-number v-model:value="chunk_size" :min="0" :max="1048576" :step="1024" style="width:100%" @blur="task.restoreInferenceNumberFallback('chunk_size')" />
+                      <AlignedInferenceInputNumber :value="chunk_size" :step="chunkSizeStep" :alignment-step="currentInferenceSampleStep" @update:value="updateChunkSize" @blur="task.restoreInferenceNumberFallback('chunk_size')" />
                     </div>
                   </n-grid-item>
                   <n-grid-item v-if="hasInferenceField('window_size')">

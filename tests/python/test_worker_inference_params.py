@@ -57,6 +57,46 @@ class InferenceParameterCompatibilityTests(unittest.TestCase):
         self.assertEqual(defaults["chunk_size"], 882000)
         self.assertEqual(defaults["num_overlap"], 2)
 
+    def test_recommended_sample_step_uses_architecture_hop(self) -> None:
+        cases = (
+            ("bs_roformer", {"model": {"stft_hop_length": 512, "fft_size": 2048}}, 512, "model.stft_hop_length"),
+            ("bs_roformer", {"audio": {"hop_length": 441}, "model": {"fft_size": 2048}}, 441, "audio.hop_length"),
+            ("mdx23c", {"audio": {"hop_length": 1024}}, 1024, "audio.hop_length"),
+            ("scnet", {"model": {"hop_size": 960}}, 960, "model.hop_size"),
+            ("bandit_v2", {"kwargs": {"hop_length": 256}}, 256, "kwargs.hop_length"),
+            ("apollo", {"model": {"sr": 44100, "win": 20}}, 441, "model.sr+win"),
+        )
+        for model_type, config, expected_step, expected_source in cases:
+            with self.subTest(model_type=model_type):
+                self.config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+                entry = types.SimpleNamespace(model_type=model_type)
+                meta = worker_models.resolve_inference_param_meta(entry, self.config_path)
+                self.assertEqual(meta, {
+                    "recommendedSampleStep": expected_step,
+                    "source": expected_source,
+                })
+
+    def test_recommended_sample_step_ignores_vr_and_invalid_values(self) -> None:
+        self.config_path.write_text(yaml.safe_dump({"model": {"hop_size": 0, "fft_size": -1}}), encoding="utf-8")
+        self.assertEqual(
+            worker_models.resolve_inference_param_meta(types.SimpleNamespace(model_type="scnet"), self.config_path),
+            {},
+        )
+        self.assertEqual(
+            worker_models.resolve_inference_param_meta(types.SimpleNamespace(model_type="vr"), self.config_path),
+            {},
+        )
+
+    def test_roformer_does_not_fall_back_to_fft_or_training_hop(self) -> None:
+        self.config_path.write_text(yaml.safe_dump({
+            "model": {"fft_size": 2048, "multi_stft_hop_size": 147},
+            "audio": {"n_fft": 2048},
+        }), encoding="utf-8")
+        self.assertEqual(
+            worker_models.resolve_inference_param_meta(types.SimpleNamespace(model_type="bs_roformer"), self.config_path),
+            {},
+        )
+
     def test_separator_receives_overlap_for_the_effective_chunk_size(self) -> None:
         separator_type = mock.Mock()
         resolved = {

@@ -517,6 +517,21 @@ class UserModelSerializationTests(unittest.TestCase):
         self.assertEqual(payload["configTargetInstrument"], "vocals")
         self.assertEqual(payload["targetStem"], "")
 
+    def test_inference_step_metadata_reuses_the_loaded_config(self):
+        self.config.write_text(
+            "model:\n  stft_hop_length: 512\n"
+            "training:\n  instruments: [vocals, instrumental]\n  target_instrument: vocals\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(worker_models, "_load_yaml_config", wraps=worker_models._load_yaml_config) as load:
+            payload = worker_models.model_to_dict(FakeUserModelEntry("my_model", self.weights, self.config))
+
+        self.assertEqual(payload["inferenceParamMeta"], {
+            "recommendedSampleStep": 512,
+            "source": "model.stft_hop_length",
+        })
+        load.assert_called_once_with(self.config)
+
     def test_legacy_catalog_entries_without_config_stem_fields_serialize(self):
         entry = LegacyCatalogEntry("old_model.pth", "old_model.pth")
         (self.root / entry.relpath).write_bytes(b"x")

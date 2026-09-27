@@ -789,6 +789,12 @@ const updateBadgeTone = computed(() => {
 const updateSupported = computed(() => {
   return buildInfo.value?.updateSupported === true || app.buildInfoUpdateSupported
 })
+const updateOverviewEmphasized = computed(() => {
+  return updates.requiresManualInstall
+    || updates.shouldShowDeferred
+    || updates.status === 'available'
+    || updates.status === 'failed'
+})
 const updateLastCheckedLabel = computed(() => {
   return formatDateTime(updates.lastCheckedAt) || t('settings.updateNeverChecked')
 })
@@ -1188,7 +1194,10 @@ onMounted(async () => {
               <span>{{ t('settings.update') }}</span>
             </div>
             <div class="update-panel">
-              <div class="update-panel__overview">
+              <div
+                class="update-panel__overview"
+                :class="{ 'update-panel__overview--emphasis': updateOverviewEmphasized }"
+              >
                 <div class="update-panel__headline">
                   <span class="update-panel__status-dot" :class="`update-panel__status-dot--${updateBadgeTone}`" aria-hidden="true" />
                   <div>
@@ -1200,57 +1209,103 @@ onMounted(async () => {
                   <n-tag type="warning" size="small">{{ t('settings.updatePrereleaseBadge') }}</n-tag>
                 </div>
               </div>
-              <div class="update-panel__version-flow">
-                <div class="update-panel__version-card update-panel__version-card--current">
+
+              <div v-if="!updateSupported" class="update-panel__compact-row">
+                <div class="update-panel__version-inline">
                   <span>{{ t('settings.updateCurrentVersionLabel') }}</span>
                   <strong>{{ appVersion }}</strong>
                 </div>
-                <span class="update-panel__version-arrow" aria-hidden="true">→</span>
-                <div class="update-panel__version-card" :class="{ 'update-panel__version-card--target': updates.latestVersion }">
-                  <span>{{ updates.latestVersion ? t('settings.updateAvailable') : t('settings.updateLatestVersion') }}</span>
-                  <strong>{{ updates.latestVersion || appVersion }}</strong>
-                </div>
-              </div>
-              <div class="update-panel__meta">
-                <span>{{ t('settings.updateLastChecked', { time: updateLastCheckedLabel }) }}</span>
-                <span v-if="updateReleaseDateLabel">{{ t('settings.updateReleaseDate', { time: updateReleaseDateLabel }) }}</span>
-              </div>
-              <div class="update-panel__channel">
-                <span>{{ t('settings.updateChannelLabel') }}</span>
-                <n-select
-                  :value="updateChannel"
-                  :options="updateChannelOptions"
-                  :disabled="!updateSupported || updates.isBusy"
-                  size="small"
-                  @update:value="changeUpdateChannel"
-                />
-              </div>
-              <p class="update-panel__notes update-panel__notes--muted">{{ updateChannel === 'prerelease' ? t('settings.updateChannelPrereleaseHint') : t('settings.updateChannelStableHint') }}</p>
-              <div class="update-panel__release-notes">
-                <span>{{ t('settings.updateReleaseNotesLabel') }}</span>
-                <p v-if="updates.releaseNotes" class="update-panel__notes">{{ updates.releaseNotes }}</p>
-                <p v-else class="update-panel__notes update-panel__notes--muted">{{ t('settings.updateNoNotes') }}</p>
-              </div>
-              <div class="update-panel__actions">
-                <n-button secondary :loading="updateChecking" :disabled="!updateSupported || updates.isBusy" @click="checkForUpdates(true)">
-                  <template #icon>
-                    <n-icon :component="RefreshOutline" />
-                  </template>
-                  {{ t('settings.checkForUpdates') }}
-                </n-button>
-                <n-button v-if="!updates.requiresManualInstall" type="primary" :loading="updateInstalling" :disabled="!updateSupported || !updates.hasUpdate || updates.isBusy" @click="installUpdate">
-                  <template #icon>
-                    <n-icon :component="CloudDownloadOutline" />
-                  </template>
-                  {{ t('settings.installUpdate') }}
-                </n-button>
-                <n-button v-else type="warning" @click="openExternalUrl(updates.manualInstallUrl || repoUrl + '/releases/latest')">
+                <n-button type="primary" secondary @click="openExternalUrl(repoUrl + '/releases/latest')">
                   <template #icon>
                     <n-icon :component="OpenOutline" />
                   </template>
                   {{ t('settings.updateOpenGitHub') }}
                 </n-button>
               </div>
+
+              <template v-else>
+                <div v-if="updates.latestVersion" class="update-panel__version-flow">
+                  <div class="update-panel__version-card update-panel__version-card--current">
+                    <span>{{ t('settings.updateCurrentVersionLabel') }}</span>
+                    <strong>{{ appVersion }}</strong>
+                  </div>
+                  <span class="update-panel__version-arrow" aria-hidden="true">→</span>
+                  <div class="update-panel__version-card update-panel__version-card--target">
+                    <span>{{ t('settings.updateAvailable') }}</span>
+                    <strong>{{ updates.latestVersion }}</strong>
+                  </div>
+                </div>
+                <div v-else class="update-panel__compact-row">
+                  <div class="update-panel__version-inline">
+                    <span>{{ t('settings.updateCurrentVersionLabel') }}</span>
+                    <strong>{{ appVersion }}</strong>
+                  </div>
+                  <span class="update-panel__last-checked">{{ t('settings.updateLastChecked', { time: updateLastCheckedLabel }) }}</span>
+                </div>
+
+                <div v-if="updates.latestVersion" class="update-panel__meta">
+                  <span>{{ t('settings.updateLastChecked', { time: updateLastCheckedLabel }) }}</span>
+                  <span v-if="updateReleaseDateLabel">{{ t('settings.updateReleaseDate', { time: updateReleaseDateLabel }) }}</span>
+                </div>
+
+                <div class="update-panel__controls">
+                  <div class="update-panel__channel">
+                    <span>{{ t('settings.updateChannelLabel') }}</span>
+                    <n-select
+                      :value="updateChannel"
+                      :options="updateChannelOptions"
+                      :disabled="updates.isBusy"
+                      size="small"
+                      @update:value="changeUpdateChannel"
+                    />
+                  </div>
+                  <div class="update-panel__actions">
+                    <n-button
+                      v-if="updates.status === 'checking'"
+                      type="primary"
+                      loading
+                      disabled
+                    >
+                      <template #icon><n-icon :component="RefreshOutline" /></template>
+                      {{ t('settings.checkForUpdates') }}
+                    </n-button>
+                    <n-button
+                      v-else-if="updates.requiresManualInstall"
+                      type="warning"
+                      @click="openExternalUrl(updates.manualInstallUrl || repoUrl + '/releases/latest')"
+                    >
+                      <template #icon><n-icon :component="OpenOutline" /></template>
+                      {{ t('settings.updateOpenGitHub') }}
+                    </n-button>
+                    <n-button
+                      v-else-if="updates.hasUpdate"
+                      type="primary"
+                      :loading="updateInstalling || updates.isInstallingUpdate"
+                      :disabled="updates.isBusy"
+                      @click="installUpdate"
+                    >
+                      <template #icon><n-icon :component="CloudDownloadOutline" /></template>
+                      {{ t('settings.installUpdate') }}
+                    </n-button>
+                    <n-button
+                      v-else
+                      type="primary"
+                      :loading="updateChecking"
+                      :disabled="updates.isBusy"
+                      @click="checkForUpdates(true)"
+                    >
+                      <template #icon><n-icon :component="RefreshOutline" /></template>
+                      {{ t('settings.checkForUpdates') }}
+                    </n-button>
+                  </div>
+                </div>
+                <p class="update-panel__channel-hint">{{ updateChannel === 'prerelease' ? t('settings.updateChannelPrereleaseHint') : t('settings.updateChannelStableHint') }}</p>
+
+                <div v-if="updates.latestVersion && updates.releaseNotes" class="update-panel__release-notes">
+                  <span>{{ t('settings.updateReleaseNotesLabel') }}</span>
+                  <p class="update-panel__notes">{{ updates.releaseNotes }}</p>
+                </div>
+              </template>
             </div>
           </article>
 
@@ -2466,6 +2521,10 @@ onMounted(async () => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  padding: 2px;
+}
+
+.update-panel__overview--emphasis {
   padding: 14px 16px;
   border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--outline));
   border-radius: 14px;
@@ -2533,6 +2592,37 @@ onMounted(async () => {
   gap: 10px;
 }
 
+.update-panel__compact-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-width: 0;
+  padding: 12px 0 2px;
+  border-top: 1px solid color-mix(in srgb, var(--outline) 52%, transparent);
+}
+
+.update-panel__version-inline {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-width: 0;
+}
+
+.update-panel__version-inline span,
+.update-panel__last-checked {
+  color: var(--on-surface-muted);
+  font-size: 12px;
+}
+
+.update-panel__version-inline strong {
+  color: var(--on-surface);
+  font-size: 18px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
 .update-panel__version-card {
   display: grid;
   gap: 4px;
@@ -2579,6 +2669,16 @@ onMounted(async () => {
   line-height: 1.5;
 }
 
+.update-panel__controls {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--outline) 52%, transparent);
+}
+
 .update-panel__channel {
   display: grid;
   grid-template-columns: auto minmax(180px, 1fr);
@@ -2591,6 +2691,13 @@ onMounted(async () => {
 
 .update-panel__channel .n-select {
   width: min(100%, 320px);
+}
+
+.update-panel__channel-hint {
+  margin: -4px 0 0;
+  color: var(--on-surface-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .update-panel__release-notes {
@@ -2615,12 +2722,9 @@ onMounted(async () => {
   white-space: pre-wrap;
 }
 
-.update-panel__notes--muted {
-  color: var(--on-surface-muted);
-}
-
 .update-panel__actions {
   display: flex;
+  justify-content: flex-end;
   flex-wrap: wrap;
   gap: 10px;
 }
@@ -2638,6 +2742,12 @@ onMounted(async () => {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .update-panel__compact-row,
+  .update-panel__controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .update-panel__version-arrow {
     justify-self: center;
     transform: rotate(90deg);
@@ -2648,6 +2758,14 @@ onMounted(async () => {
   }
 
   .update-panel__channel .n-select {
+    width: 100%;
+  }
+
+  .update-panel__actions {
+    justify-content: stretch;
+  }
+
+  .update-panel__actions .n-button {
     width: 100%;
   }
 }

@@ -35,9 +35,11 @@ import { useAppStore } from '@/stores/app'
 import { formatBytes, formatSpeedMBps } from '@/utils/format'
 import { buildModelCategoryOptionsFromPairs, getModelCategoryLabel } from '@/utils/modelCategory'
 import { MODEL_LIBRARY_PAGE_SIZES } from '@/utils/pagination'
+import { resolveInferenceSampleStep } from '@/features/inference/sampleStep'
 import ModelProgressBlock from '@/components/ModelProgressBlock.vue'
 import DownloadDetailModal from '@/components/DownloadDetailModal.vue'
 import CustomModelImportDialog from '@/components/CustomModelImportDialog.vue'
+import AlignedInferenceInputNumber from '@/components/AlignedInferenceInputNumber.vue'
 
 const { t, locale } = useI18n()
 const message = useMessage()
@@ -100,6 +102,13 @@ const noteEditorModel = ref<ModelEntry | null>(null)
 const noteDraft = ref('')
 const showInferenceEditor = ref(false)
 const inferenceEditorModel = ref<ModelEntry | null>(null)
+const inferenceEditorSampleStep = computed(() => inferenceEditorModel.value?.inferenceParamMeta?.recommendedSampleStep)
+const inferenceEditorOverlapStep = computed(() => resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1))
+const inferenceEditorChunkStep = computed(() => resolveInferenceSampleStep(inferenceEditorModel.value?.inferenceParamMeta, 1024))
+
+function updateInferenceDraftSize(key: 'overlap_size' | 'chunk_size', value: number | null) {
+  inferenceDraft.value[key] = value as number
+}
 
 const categoryOptions = computed(() => {
   return buildModelCategoryOptionsFromPairs(categories.value, categoriesCn.value, locale.value, t('common.all'))
@@ -1356,11 +1365,11 @@ onMounted(() => {
             </label>
             <label class="inference-editor-field">
               <span>{{ t('inference.overlapSize') }}</span>
-              <n-input-number v-model:value="inferenceDraft.overlap_size" :min="0" :max="1048576" />
+              <AlignedInferenceInputNumber :value="inferenceDraft.overlap_size" :step="inferenceEditorOverlapStep" :alignment-step="inferenceEditorSampleStep" @update:value="updateInferenceDraftSize('overlap_size', $event)" />
             </label>
             <label class="inference-editor-field">
               <span>{{ t('inference.chunkSize') }}</span>
-              <n-input-number v-model:value="inferenceDraft.chunk_size" :min="0" :max="1048576" :step="1024" />
+              <AlignedInferenceInputNumber :value="inferenceDraft.chunk_size" :step="inferenceEditorChunkStep" :alignment-step="inferenceEditorSampleStep" @update:value="updateInferenceDraftSize('chunk_size', $event)" />
             </label>
           </div>
         </div>

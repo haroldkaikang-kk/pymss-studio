@@ -7,6 +7,7 @@ import { MODEL_LIBRARY_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 import { matchesModelSource, type ModelSourceFilter } from '@/utils/modelSource'
 import { useAppStore } from '@/stores/app'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
+import { normalizeInferenceParamMeta, type InferenceParamMeta } from '@/features/inference/sampleStep'
 
 /** How the model library lays its entries out. */
 export type ModelViewMode = 'card' | 'list'
@@ -54,6 +55,7 @@ export type ModelEntry = {
   defaultInferenceParams?: ModelDefaultInferenceParams
   defaultInferenceParamsResolved?: boolean
   defaultInferenceParamsSource?: 'config' | 'runtime_fallback'
+  inferenceParamMeta?: InferenceParamMeta
 }
 
 /** One architecture the worker thinks a weights file might be, with why it thinks so. */
@@ -383,6 +385,7 @@ function normalizeModelEntry(model: ModelEntry): ModelEntry {
     ...model,
     defaultInferenceParams: normalizeDefaultInferenceParams(rawDefaults),
     defaultInferenceParamsResolved: rawDefaults !== undefined,
+    inferenceParamMeta: normalizeInferenceParamMeta(model.inferenceParamMeta),
   }
 }
 

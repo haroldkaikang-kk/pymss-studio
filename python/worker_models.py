@@ -613,7 +613,70 @@ def _derive_overlap_size_from_num_overlap(chunk_size: Any, num_overlap: Any) -> 
     return overlap_size
 
 
-def resolve_default_inference_params(entry: Any, model_path: Path, config_path: Path | None) -> dict[str, Any]:
+def _positive_config_int(value: Any) -> int | None:
+    parsed = _as_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _nested_config_value(config: dict[str, Any], section: str, key: str) -> Any:
+    value = config.get(section)
+    return value.get(key) if isinstance(value, dict) else None
+
+
+def resolve_inference_param_meta(
+    entry: Any,
+    config_path: Path | None,
+    config_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    model_type = str(getattr(entry, "model_type", "") or "").strip().lower()
+    if model_type == "vr" or not config_path or not config_path.is_file():
+        return {}
+    try:
+        config = config_data if config_data is not None else _load_yaml_config(config_path)
+    except Exception:
+        return {}
+
+    candidates: list[tuple[str, Any]] = []
+    if model_type in {"mel_band_roformer", "mel_band_conformer", "bs_roformer", "bs_conformer", "bs_roformer_hyperace"}:
+        candidates.append(("model.stft_hop_length", _nested_config_value(config, "model", "stft_hop_length")))
+        candidates.append(("audio.hop_length", _nested_config_value(config, "audio", "hop_length")))
+    elif model_type == "mdx23c":
+        candidates.append(("audio.hop_length", _nested_config_value(config, "audio", "hop_length")))
+    elif model_type == "scnet":
+        candidates.append(("model.hop_size", _nested_config_value(config, "model", "hop_size")))
+    elif model_type in {"bandit", "bandit_v2"}:
+        section = "kwargs" if model_type == "bandit_v2" else "model"
+        candidates.append((f"{section}.hop_length", _nested_config_value(config, section, "hop_length")))
+    elif model_type == "apollo":
+        sample_rate = _positive_config_int(_nested_config_value(config, "model", "sr"))
+        window_ms = _as_float(_nested_config_value(config, "model", "win"))
+        if sample_rate is not None and window_ms is not None and window_ms > 0:
+            candidates.append(("model.sr+win", int(sample_rate * window_ms // 1000) // 2))
+    else:
+        for section in ("model", "kwargs", "audio", "inference", "features"):
+            for key in ("stft_hop_length", "hop_length", "hop_size"):
+                candidates.append((f"{section}.{key}", _nested_config_value(config, section, key)))
+            section_value = config.get(section)
+            stft = section_value.get("stft") if isinstance(section_value, dict) else None
+            if isinstance(stft, dict):
+                for key in ("hop_length", "hop_size"):
+                    candidates.append((f"{section}.stft.{key}", stft.get(key)))
+        for key in ("stft_hop_length", "hop_length", "hop_size"):
+            candidates.append((key, config.get(key)))
+
+    for source, value in candidates:
+        step = _positive_config_int(value)
+        if step is not None:
+            return {"recommendedSampleStep": step, "source": source}
+    return {}
+
+
+def resolve_default_inference_params(
+    entry: Any,
+    model_path: Path,
+    config_path: Path | None,
+    config_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     model_type = str(getattr(entry, "model_type", "") or "").strip().lower()
     defaults: dict[str, Any] = {}
 
@@ -636,7 +699,7 @@ def resolve_default_inference_params(entry: Any, model_path: Path, config_path: 
         }
 
     try:
-        config = _load_yaml_config(config_path)
+        config = config_data if config_data is not None else _load_yaml_config(config_path)
     except Exception:
         return defaults
 
@@ -689,11 +752,14 @@ def resolve_default_inference_params(entry: Any, model_path: Path, config_path: 
     return defaults
 
 
-def resolve_config_stems(config_path: Path | None) -> tuple[str, str]:
+def resolve_config_stems(
+    config_path: Path | None,
+    config_data: dict[str, Any] | None = None,
+) -> tuple[str, str]:
     if not config_path or not config_path.is_file():
         return "", ""
     try:
-        config = _load_yaml_config(config_path)
+        config = config_data if config_data is not None else _load_yaml_config(config_path)
     except Exception:
         return "", ""
     training = config.get("training") if isinstance(config, dict) else None
@@ -749,11 +815,17 @@ def model_to_dict(entry: Any, model_dir: str | None = None, include_local_state:
     downloaded = include_local_state and not missing_paths
     config_instruments = str(getattr(entry, "config_instruments", "") or "").strip()
     config_target_instrument = str(getattr(entry, "config_target_instrument", "") or "").strip()
+    config_data: dict[str, Any] | None = None
     if config_path and config_path.is_file():
-        resolved_instruments, resolved_target = resolve_config_stems(config_path)
+        try:
+            config_data = _load_yaml_config(config_path)
+        except Exception:
+            config_data = {}
+        resolved_instruments, resolved_target = resolve_config_stems(config_path, config_data)
         config_instruments = resolved_instruments or config_instruments
         config_target_instrument = resolved_target or config_target_instrument
-    default_inference_params = resolve_default_inference_params(entry, model_path, config_path)
+    default_inference_params = resolve_default_inference_params(entry, model_path, config_path, config_data)
+    inference_param_meta = resolve_inference_param_meta(entry, config_path, config_data)
     default_inference_params_source = "config" if config_path and config_path.is_file() else "runtime_fallback"
     return {
         "name": str(getattr(entry, "name", "") or ""),
@@ -790,6 +862,7 @@ def model_to_dict(entry: Any, model_dir: str | None = None, include_local_state:
         "auxiliaryPaths": [str(path) for path in auxiliary_paths],
         "defaultInferenceParams": default_inference_params,
         "defaultInferenceParamsSource": default_inference_params_source,
+        "inferenceParamMeta": inference_param_meta,
     }
 
 
