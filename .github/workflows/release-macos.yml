@@ -67,6 +67,9 @@ jobs:
           fi
           PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 -c "import importlib.util, sys, ssl, venv, pip, pymss, pymss_core, torch; assert importlib.util.find_spec('mlx') is not None; assert torch.version.cuda is None; print(sys.prefix); print('bundled MLX runtime ok')"
 
+      - name: Install aria2 runtime libraries
+        run: brew install --formula zlib expat sqlite c-ares
+
       - name: Copy clean resources for Tauri bundling
         env:
           PYMSS_MACOS_TOOLS_ARCH: ${{ matrix.arch }}
@@ -165,18 +168,49 @@ jobs:
           test -x "$BIN/ffmpeg"
           test -x "$BIN/ffprobe"
           test -x "$BIN/aria2c"
-          for TOOL in ffmpeg ffprobe aria2c; do
-            INVALID_DEPS="$(otool -L "$BIN/$TOOL" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/|$)' || true)"
-            if [ -n "$INVALID_DEPS" ]; then
-              echo "$TOOL still links non-system libraries:" >&2
-              echo "$INVALID_DEPS" >&2
-              exit 1
+          while IFS= read -r -d '' MACHO; do
+            if ! file -b "$MACHO" | grep -q 'Mach-O'; then
+              continue
             fi
-          done
+            while IFS= read -r DEP; do
+              case "$DEP" in
+                /usr/lib/*|/System/Library/*) ;;
+                @loader_path/*)
+                  RESOLVED="$(dirname "$MACHO")/${DEP#@loader_path/}"
+                  if [ ! -f "$RESOLVED" ]; then
+                    echo "Missing bundled dependency: $MACHO -> $DEP" >&2
+                    exit 1
+                  fi
+                  ;;
+                *)
+                  echo "Non-relocatable bundled dependency: $MACHO -> $DEP" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(otool -L "$MACHO" | tail -n +2 | awk '{print $1}')
+            while IFS= read -r RPATH; do
+              case "$RPATH" in
+                /opt/homebrew/*|/usr/local/*)
+                  echo "Host-specific LC_RPATH remains: $MACHO -> $RPATH" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(otool -l "$MACHO" | awk '$1 == "cmd" && $2 == "LC_RPATH" { expect_path = 1; next } expect_path && $1 == "path" { print $2; expect_path = 0 }')
+          done < <(find "$BIN" -type f -print0)
           ISOLATED_PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin"
           PATH="$ISOLATED_PATH" "$BIN/ffmpeg" -version
           PATH="$ISOLATED_PATH" "$BIN/ffprobe" -version
           PATH="$ISOLATED_PATH" "$BIN/aria2c" --version
+          ARIA2_SMOKE_DIR="$(mktemp -d)"
+          ARIA2_SMOKE_SOURCE="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/raw/$GITHUB_SHA/LICENSE"
+          env -u DYLD_LIBRARY_PATH -u DYLD_FALLBACK_LIBRARY_PATH -u DYLD_FRAMEWORK_PATH \
+            PATH="$ISOLATED_PATH" "$BIN/aria2c" \
+            --allow-overwrite=true \
+            --auto-file-renaming=false \
+            --dir="$ARIA2_SMOKE_DIR" \
+            --out=LICENSE \
+            "$ARIA2_SMOKE_SOURCE"
+          test "$(shasum -a 256 LICENSE | awk '{print $1}')" = "$(shasum -a 256 "$ARIA2_SMOKE_DIR/LICENSE" | awk '{print $1}')"
           test -d "$RESOURCE_ROOT/python-runtime/lib/python3.12"
           if otool -L "$PY" | grep -q '/Library/Frameworks/Python.framework/Versions/'; then
             echo "Bundled app runtime unexpectedly links system Python framework: $PY"
