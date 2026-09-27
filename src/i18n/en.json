@@ -201,7 +201,7 @@
     "inspectTitle": "Audio details",
     "inspectDescription": "Inspect containers, audio streams, encoding parameters, and metadata with FFprobe.",
     "inspectHint": "Analysis reads the file locally and never modifies the source audio.",
-    "inspectPrivacyHint": "This operation only reads media information. It does not re-encode or write to the source file.",
+    "inspectPrivacyHint": "Media information is read locally; the original file is not modified.",
     "inputFile": "Input audio",
     "chooseAudio": "Choose an audio file",
     "startInspect": "Inspect",

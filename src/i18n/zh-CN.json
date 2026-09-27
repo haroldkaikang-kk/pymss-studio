@@ -201,7 +201,7 @@
     "inspectTitle": "音频详细信息",
     "inspectDescription": "使用 FFprobe 读取容器、音频流、编码参数与元数据标签。",
     "inspectHint": "分析仅在本地读取文件，不会修改源音频。",
-    "inspectPrivacyHint": "该操作只读取媒体信息，不会重新编码或写入源文件。",
+    "inspectPrivacyHint": "仅在本机读取媒体信息，不会修改原文件。",
     "inputFile": "输入音频",
     "chooseAudio": "选择音频文件",
     "startInspect": "读取信息",

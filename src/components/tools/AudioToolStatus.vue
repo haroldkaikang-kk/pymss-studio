@@ -15,7 +15,7 @@ import type {
   AudioToolResult,
 } from '@/features/audio-tools/types'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   busy: boolean
   cancelling: boolean
   hasResult: boolean
@@ -25,7 +25,10 @@ const props = defineProps<{
   result: AudioToolResult | null
   elapsedMs: number
   logs: AudioToolLogEntry[]
-}>()
+  compact?: boolean
+}>(), {
+  compact: false,
+})
 
 const emit = defineEmits<{
   cancel: []
@@ -81,6 +84,15 @@ const statusLabel = computed(() => {
   if (props.hasResult && props.result) return phaseLabels.value.completed
   return t('tools.statusReady')
 })
+const showStatusOverview = computed(() => (
+  !props.compact
+  || props.busy
+  || Boolean(props.error)
+  || props.progress.phase === 'cancelled'
+  || !props.hasResult
+  || !props.result
+))
+const showActivityPanel = computed(() => !props.compact || Boolean(props.error))
 
 watch(() => props.logs.length, async () => {
   await nextTick()
@@ -144,8 +156,9 @@ function showLogProgress(entry: AudioToolLogEntry) {
 </script>
 
 <template>
-  <div class="audio-tool-status">
+  <div class="audio-tool-status" :class="{ 'audio-tool-status--compact': compact }">
     <section
+      v-if="showStatusOverview"
       class="status-overview"
       :class="{
         'status-overview--busy': busy,
@@ -275,7 +288,7 @@ function showLogProgress(entry: AudioToolLogEntry) {
       </n-button>
     </section>
 
-    <section class="activity-panel">
+    <section v-if="showActivityPanel" class="activity-panel">
       <header class="activity-panel__header">
         <span>
           <n-icon :component="TerminalOutline" />
