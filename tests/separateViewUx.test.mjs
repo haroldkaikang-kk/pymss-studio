@@ -8,6 +8,7 @@ import { parse } from 'vue/compiler-sfc'
 const path = new URL('../src/views/SeparateView.vue', import.meta.url)
 const { descriptor } = parse(readFileSync(path, 'utf8'))
 const template = descriptor.template?.content || ''
+const style = descriptor.styles.map(item => item.content).join('\n')
 const modelsPath = new URL('../src/views/ModelsView.vue', import.meta.url)
 const modelsTemplate = parse(readFileSync(modelsPath, 'utf8')).descriptor.template?.content || ''
 const scriptSource = descriptor.scriptSetup.content
@@ -35,9 +36,33 @@ assert.equal(selected.length, names.size)
 const code = ts.transpileModule(selected.map(statement => statement.getText(script)).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
+const stemSelectionNames = new Set([
+  'outputStemSelectionCleared',
+  'checkedOutputStems',
+  'selectedOutputStemCount',
+  'hasOutputStemSelection',
+  'selectAllOutputStems',
+  'clearOutputStems',
+])
+const stemSelectionStatements = script.statements.filter(statement => (
+  ts.isFunctionDeclaration(statement) ? stemSelectionNames.has(statement.name?.text)
+    : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => stemSelectionNames.has(item.name.getText(script)))
+))
+assert.equal(stemSelectionStatements.length, stemSelectionNames.size)
+const stemSelectionCode = ts.transpileModule(stemSelectionStatements.map(statement => statement.getText(script)).join('\n'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText
 
-function computed(read) {
-  return { get value() { return read() } }
+function computed(source) {
+  if (typeof source === 'function') return { get value() { return source() } }
+  return {
+    get value() { return source.get() },
+    set value(value) { source.set(value) },
+  }
+}
+
+function ref(value) {
+  return { value }
 }
 
 test('model and workflow targets keep their keyed transition boundary', () => {
@@ -108,6 +133,49 @@ test('terminal task actions use state-specific hierarchy', () => {
   assert.ok(template.includes("t('separate.runAgain')"))
   assert.ok(template.includes('class="result-path"'))
   assert.ok(template.includes("@click.stop=\"task.revealPath(currentTask.outputs[0]?.path || currentTask.output)\""))
+})
+
+test('output stem picker uses the app scrollbar instead of native browser controls', () => {
+  assert.ok(style.includes('.ofield--stems .stem-chips::-webkit-scrollbar'))
+  assert.ok(style.includes('.ofield--stems .stem-chips::-webkit-scrollbar-thumb:hover'))
+  assert.ok(style.includes('.ofield--stems .stem-chips::-webkit-scrollbar-button'))
+  assert.ok(style.includes('scrollbar-width: thin'))
+})
+
+test('large output stem lists expose compact bulk selection actions', () => {
+  assert.ok(template.includes('availableStemNames.length > 3'))
+  assert.ok(template.includes('@click="selectAllOutputStems"'))
+  assert.ok(template.includes('@click="clearOutputStems"'))
+  assert.ok(template.includes("t('separate.selectAllStems')"))
+  assert.ok(template.includes("t('separate.clearStemSelection')"))
+  assert.ok(scriptSource.includes('outputStemSelectionCleared.value = true'))
+  assert.ok(scriptSource.includes('&& hasOutputStemSelection.value'))
+})
+
+test('output stem bulk actions distinguish all stems from an empty selection', () => {
+  const context = {
+    computed,
+    ref,
+    availableStemNames: ref(['vocals', 'instrumental', 'drums', 'bass']),
+    selectedStems: ref([]),
+  }
+  const result = vm.runInNewContext(`${stemSelectionCode}\n({ checkedOutputStems, selectedOutputStemCount, hasOutputStemSelection, selectAllOutputStems, clearOutputStems })`, context)
+
+  assert.deepEqual(Array.from(result.checkedOutputStems.value), context.availableStemNames.value)
+  assert.equal(result.hasOutputStemSelection.value, true)
+
+  result.clearOutputStems()
+  assert.deepEqual(Array.from(result.checkedOutputStems.value), [])
+  assert.equal(result.selectedOutputStemCount.value, 0)
+  assert.equal(result.hasOutputStemSelection.value, false)
+
+  result.checkedOutputStems.value = ['vocals']
+  assert.deepEqual(Array.from(context.selectedStems.value), ['vocals'])
+  assert.equal(result.hasOutputStemSelection.value, true)
+
+  result.selectAllOutputStems()
+  assert.deepEqual(Array.from(result.checkedOutputStems.value), context.availableStemNames.value)
+  assert.deepEqual(Array.from(context.selectedStems.value), [])
 })
 
 test('advanced inference settings expose model-scoped save and reset actions', async () => {

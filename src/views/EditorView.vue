@@ -26,7 +26,7 @@ const route = useRoute()
 const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const editor = useEditorStore()
 const task = useTaskStore()
 const settings = useSettingsStore()
@@ -396,6 +396,7 @@ useEditorShortcuts({
 })
 
 watch(() => editor.session?.id, stopPlaybackAndReset)
+watch(locale, () => editor.localizeDefaultTrackNames(), { immediate: true })
 watch(routeProjectId, (value) => {
   if (!value) {
     editor.clearSession()

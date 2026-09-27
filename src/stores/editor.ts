@@ -219,13 +219,70 @@ function stemKeyFromOutput(output: StemOutput | { stem?: string; path?: string }
   return raw
 }
 
-function displayStemName(stemKey: string, fallback: string) {
-  if (stemKey === 'vocals') return '人声'
-  if (stemKey === 'accompaniment') return '伴奏'
-  if (stemKey === 'drums') return '鼓组'
-  if (stemKey === 'bass') return '贝斯'
-  if (stemKey === 'other') return '其他'
-  return fallback
+const STEM_NAME_KEYS: Record<string, string> = {
+  vocals: 'editor.stemVocals',
+  accompaniment: 'editor.stemAccompaniment',
+  drums: 'editor.stemDrums',
+  bass: 'editor.stemBass',
+  other: 'editor.stemOther',
+}
+
+const LEGACY_STEM_NAMES: Record<string, string[]> = {
+  vocals: ['vocals', 'vocal', 'voice', '人声'],
+  accompaniment: ['instrumental', 'instrument', 'accompaniment', 'karaoke', '伴奏'],
+  drums: ['drums', 'drum', '鼓组'],
+  bass: ['bass', '贝斯'],
+  other: ['other', '其他'],
+}
+
+const EXACT_STEM_KEYS = new Map(
+  Object.entries(LEGACY_STEM_NAMES).flatMap(([stemKey, names]) => (
+    names
+      .filter(name => /^[a-z]+$/i.test(name))
+      .map(name => [normalizedDefaultName(name), stemKey] as const)
+  )),
+)
+
+function normalizedDefaultName(value: string | null | undefined) {
+  return String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, ' ')
+}
+
+function localizedStemName(stemKey: string | null | undefined, fallback: string) {
+  if (!stemKey) return fallback
+  const exactStemKey = EXACT_STEM_KEYS.get(normalizedDefaultName(stemKey))
+  const broadStemKey = stemKeyFromOutput({ stem: stemKey })
+  const fallbackIsLegacyName = (LEGACY_STEM_NAMES[broadStemKey] || [])
+    .some(name => normalizedDefaultName(name) === normalizedDefaultName(fallback))
+  const canonicalKey = exactStemKey || (fallbackIsLegacyName ? broadStemKey : '')
+  const translationKey = STEM_NAME_KEYS[canonicalKey]
+  return translationKey ? String(i18n.global.t(translationKey)) : fallback
+}
+
+function recordingTrackIndex(name: string) {
+  const match = name.trim().match(/^(?:recording|录音)\s*(\d+)$/i)
+  return match ? Math.max(1, Number(match[1])) : null
+}
+
+function isLegacyAutoTrackName(name: string, role: EditorSourceRole, stemKey?: string | null) {
+  if (role === 'recording') return recordingTrackIndex(name) !== null
+  if (role !== 'stem' || !stemKey) return false
+  const canonicalKey = stemKeyFromOutput({ stem: stemKey || '' })
+  const candidates = [stemKey || '', ...(LEGACY_STEM_NAMES[canonicalKey] || [])]
+  const normalizedName = normalizedDefaultName(name)
+  return candidates.some((candidate) => normalizedDefaultName(candidate) === normalizedName)
+}
+
+function localizedAutoTrackName(
+  name: string,
+  role: EditorSourceRole,
+  stemKey?: string | null,
+) {
+  if (role === 'recording') {
+    const index = recordingTrackIndex(name)
+    return index === null ? name : String(i18n.global.t('editor.recordingTrackName', { index }))
+  }
+  if (role === 'stem') return localizedStemName(stemKey, name)
+  return name
 }
 
 function trackColor(role: EditorSourceRole, stemKey?: string | null) {
@@ -288,9 +345,11 @@ function normalizePathKey(value: string) {
 }
 
 function sourceDisplayGroup(source: EditorSource) {
-  if (source.role === 'recording') return '录音'
-  if (source.originKind === 'task-result' || source.role === 'stem') return '分离结果'
-  return '外部资产'
+  if (source.role === 'recording') return String(i18n.global.t('editor.assetGroupRecordings'))
+  if (source.originKind === 'task-result' || source.role === 'stem') {
+    return String(i18n.global.t('editor.assetGroupSeparationResults'))
+  }
+  return String(i18n.global.t('editor.assetGroupExternal'))
 }
 
 function resolveAssetUrl(path: string) {
@@ -355,6 +414,10 @@ function normalizeTrack(
     ? track.role
     : (source?.role || 'stem')
   const stemKey = source?.stemKey || null
+  const storedName = String(track.name || source?.name || 'Track')
+  const autoName = typeof track.autoName === 'boolean'
+    ? track.autoName
+    : isLegacyAutoTrackName(storedName, role, stemKey)
   const clips = Array.isArray(track.clips)
     ? track.clips
         .map((clip) => normalizeClip(clip, sources.get(String(clip.assetId || track.sourceId || ''))))
@@ -387,7 +450,8 @@ function normalizeTrack(
     id: String(track.id || makeId('track')),
     sourceId: String(track.sourceId || source?.id || ''),
     role,
-    name: String(track.name || source?.name || 'Track'),
+    name: autoName ? localizedAutoTrackName(storedName, role, stemKey) : storedName,
+    autoName,
     color: String(track.color || trackColor(role, stemKey)),
     volume: clamp(Number(track.volume ?? 1), 0, 2),
     pan: clamp(Number(track.pan ?? 0), -1, 1),
@@ -565,9 +629,10 @@ export const useEditorStore = defineStore('editor', () => {
   const referenceTracks = computed(() => session.value?.tracks.filter((track) => track.role === 'reference') || [])
   const assetTree = computed<EditorAssetTreeNode[]>(() => {
     if (!session.value) return []
+    const rootName = String(i18n.global.t('editor.assets'))
     const root: EditorAssetTreeNode = {
       key: '__root__',
-      name: 'Assets',
+      name: rootName,
       path: '',
       expanded: true,
       children: [],
@@ -613,7 +678,7 @@ export const useEditorStore = defineStore('editor', () => {
       node.children.forEach(sortTree)
     }
     sortTree(root)
-    return root.children.length ? root.children : [{ ...root, name: 'Assets' }]
+    return root.children.length ? root.children : [{ ...root, name: rootName }]
   })
 
   const duration = computed(() => {
@@ -1295,6 +1360,7 @@ export const useEditorStore = defineStore('editor', () => {
       role: 'recording',
       type: 'recording',
       name: String(i18n.global.t('editor.recordingTrackName', { index })),
+      autoName: true,
       color: trackColor('recording'),
       volume: 1,
       pan: 0,
@@ -1327,6 +1393,7 @@ export const useEditorStore = defineStore('editor', () => {
         role: 'recording',
         type: 'recording',
         name: String(i18n.global.t('editor.recordingTrackName', { index })),
+        autoName: true,
         color: trackColor('recording'),
         volume: 1,
         pan: 0,
@@ -1469,7 +1536,17 @@ export const useEditorStore = defineStore('editor', () => {
 
     pushHistory()
     track.name = resolvedName
+    track.autoName = false
     scheduleSave()
+  }
+
+  function localizeDefaultTrackNames() {
+    if (!session.value) return
+    for (const track of session.value.tracks) {
+      if (!track.autoName) continue
+      const source = sourceMap.value.get(track.sourceId)
+      track.name = localizedAutoTrackName(track.name, track.role, source?.stemKey)
+    }
   }
 
   function toggleTrackFlag(trackId: string, flag: 'muted' | 'solo') {
@@ -1833,6 +1910,7 @@ export const useEditorStore = defineStore('editor', () => {
     missingSourcesInUse,
     assertNoMissingSourcesInUse,
     renameTrack,
+    localizeDefaultTrackNames,
     toggleTrackFlag,
     setTrackVolume,
     setTrackPan,

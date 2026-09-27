@@ -1284,26 +1284,6 @@ fn stem_rank(stem: &str) -> usize {
     }
 }
 
-fn display_stem_name(stem: &str) -> String {
-    let lower = stem.to_ascii_lowercase();
-    if lower.contains("vocal") || lower.contains("voice") {
-        "人声".to_string()
-    } else if lower.contains("instrument")
-        || lower.contains("accompaniment")
-        || lower.contains("karaoke")
-    {
-        "伴奏".to_string()
-    } else if lower.contains("drum") {
-        "鼓组".to_string()
-    } else if lower.contains("bass") {
-        "贝斯".to_string()
-    } else if lower.contains("other") {
-        "其他".to_string()
-    } else {
-        stem.to_string()
-    }
-}
-
 fn write_editor_project(app: &AppHandle, project: &Value) -> AppResult<Value> {
     let project_id = project
         .get("id")
@@ -1636,7 +1616,8 @@ pub async fn create_editor_project_from_task(app: AppHandle, payload: Value) -> 
                 "id": format!("track_{}", index),
                 "sourceId": format!("source_{}_{}", index, safe_file_name(stem)),
                 "role": "stem",
-                "name": display_stem_name(stem),
+                "name": stem,
+                "autoName": true,
                 "color": Value::Null,
                 "volume": 1,
                 "muted": false,

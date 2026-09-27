@@ -378,22 +378,37 @@ const ensembleReady = computed(() => ensembleEnabled.value
     const options = ensembleStemOptionsByModel.value[name] || []
     return Boolean(selectedStem) && options.some(option => option.value.toLowerCase() === selectedStem.toLowerCase())
   }))
+const outputStemSelectionCleared = ref(false)
 const selectedStemSummary = computed(() => {
+  if (outputStemSelectionCleared.value) return t('separate.noStemsSelected')
   if (!selectedStems.value.length) return t('separate.allStems')
   return selectedStems.value.join(', ')
 })
 const checkedOutputStems = computed<string[]>({
   get() {
+    if (outputStemSelectionCleared.value) return []
     if (!selectedStems.value.length) return [...availableStemNames.value]
     return selectedStems.value
   },
   set(value) {
     const allowed = new Set(availableStemNames.value)
     const next = value.filter(stem => allowed.has(stem))
+    outputStemSelectionCleared.value = next.length === 0
     selectedStems.value = next.length === availableStemNames.value.length ? [] : next
   },
 })
 const selectedOutputStemCount = computed(() => checkedOutputStems.value.length)
+const hasOutputStemSelection = computed(() => (
+  !availableStemNames.value.length || selectedOutputStemCount.value > 0
+))
+function selectAllOutputStems() {
+  outputStemSelectionCleared.value = false
+  selectedStems.value = []
+}
+function clearOutputStems() {
+  outputStemSelectionCleared.value = true
+  selectedStems.value = []
+}
 const selectedStemDetail = computed(() => {
   if (selectedStems.value.length > 6) {
     return t('separate.selectedStemCount', {
@@ -610,6 +625,9 @@ const startStatusText = computed(() => {
   if (!inputFiles.value.length) return t('separate.outputDirectorySummary')
   if (runMode.value === 'model' && ensembleEnabled.value && !ensembleReady.value) return t('separate.ensembleNotReady')
   if (runMode.value === 'model' && !ensembleEnabled.value && !modelDownloaded.value) return t('separate.startHintModelMissing')
+  if (runMode.value === 'model' && !ensembleEnabled.value && !hasOutputStemSelection.value) {
+    return t('separate.startHintNoOutputStems')
+  }
   return t('separate.outputDirectorySummary')
 })
 const modelCategoryOptions = computed(() => [
@@ -695,7 +713,9 @@ const canStart = computed(() => (
   && !outputDirectoryError.value
   && (runMode.value === 'workflow'
     ? Boolean(selectedWorkflow.value) && inputFiles.value.length > 0
-    : ensembleEnabled.value ? ensembleReady.value : (modelDownloaded.value && inputFiles.value.length > 0))
+    : ensembleEnabled.value
+      ? ensembleReady.value
+      : (modelDownloaded.value && inputFiles.value.length > 0 && hasOutputStemSelection.value))
 ))
 const newestRunningJob = computed(() => {
   return [...task.allJobs]
@@ -1372,6 +1392,7 @@ function prefetchSelectedModelAdvancedParams() {
 
 watch(selectedModelName, (name, previousName) => {
   if (previousName && previousName !== name) task.saveCurrentModelState(previousName)
+  if (previousName !== name) outputStemSelectionCleared.value = false
 })
 
 watch(ensembleModels, (models) => {
@@ -1731,6 +1752,10 @@ async function start() {
     message.warning(t('separate.startHintModelMissing'))
     return
   }
+  if (runMode.value === 'model' && !ensembleEnabled.value && !hasOutputStemSelection.value) {
+    message.warning(t('separate.startHintNoOutputStems'))
+    return
+  }
   submittingJob.value = true
   try {
     const result = runMode.value === 'workflow' && selectedWorkflow.value
@@ -2054,7 +2079,22 @@ async function retryCurrentTask() {
             </div>
 
             <div v-if="runMode === 'model'" class="ofield ofield--stems">
-              <span class="ofield__label">{{ t('separate.outputStems') }}</span>
+              <div class="ofield__heading">
+                <span class="ofield__label">{{ t('separate.outputStems') }}</span>
+                <div v-if="!ensembleEnabled && availableStemNames.length > 3" class="stem-selection-actions">
+                  <button
+                    type="button"
+                    :disabled="isRunModeLocked || selectedOutputStemCount === availableStemNames.length"
+                    @click="selectAllOutputStems"
+                  >{{ t('separate.selectAllStems') }}</button>
+                  <span aria-hidden="true">·</span>
+                  <button
+                    type="button"
+                    :disabled="isRunModeLocked || selectedOutputStemCount === 0"
+                    @click="clearOutputStems"
+                  >{{ t('separate.clearStemSelection') }}</button>
+                </div>
+              </div>
               <div v-if="ensembleEnabled" class="ofield__static">{{ ensembleStem || '—' }}</div>
               <div v-else-if="availableStemNames.length" class="stem-chips">
                 <n-checkbox-group v-model:value="checkedOutputStems" :disabled="isRunModeLocked">
@@ -3410,6 +3450,43 @@ async function retryCurrentTask() {
   font-weight: 500;
 }
 
+.ofield__heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.stem-selection-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  color: color-mix(in srgb, var(--on-surface-muted) 70%, transparent);
+  font-size: 11px;
+}
+
+.stem-selection-actions button {
+  padding: 0;
+  border: 0;
+  color: var(--primary-strong);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.stem-selection-actions button:hover:not(:disabled) {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.stem-selection-actions button:disabled {
+  color: color-mix(in srgb, var(--on-surface-muted) 52%, transparent);
+  cursor: default;
+}
+
 .ofield__static {
   min-height: 30px;
   display: flex;
@@ -3511,8 +3588,39 @@ async function retryCurrentTask() {
 .ofield--stems .stem-chips {
   max-height: 108px;
   overflow-y: auto;
-  padding: 2px 2px 2px 0;
+  padding: 2px 4px 2px 0;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--on-surface-muted) 44%, transparent) transparent;
+}
+
+.ofield--stems .stem-chips::-webkit-scrollbar {
+  width: 9px;
+}
+
+.ofield--stems .stem-chips::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: transparent;
+}
+
+.ofield--stems .stem-chips::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--on-surface-muted) 44%, transparent) padding-box;
+}
+
+.ofield--stems .stem-chips::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--primary) 64%, transparent) padding-box;
+}
+
+.ofield--stems .stem-chips::-webkit-scrollbar-button,
+.ofield--stems .stem-chips::-webkit-scrollbar-corner {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
 }
 
 .stem-chips :deep(.n-checkbox-group) {
