@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: intel-monterey-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -28,12 +28,20 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Prepare Rust target
         run: rustup target add x86_64-apple-darwin
-      - name: Prepare audio tool dependencies
-        run: brew install --formula zlib expat sqlite c-ares
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
       - name: Build patched engine wheels
         run: bash scripts/build-intel-engine-wheels.sh
-      - name: Build and verify Intel app
-        run: bash scripts/build-intel-macos.sh
+      - name: Prepare bundled Python engine
+        run: python3 scripts/prepare-intel-runtime.py
+      - name: Prepare Monterey audio tools
+        run: bash scripts/prepare-intel-tools.sh
+      - name: Build Intel app
+        run: bash scripts/build-intel-macos.sh build
+      - name: Verify and package Intel app
+        run: bash scripts/build-intel-macos.sh verify
       - name: Upload installable app
         uses: actions/upload-artifact@v4
         with:
@@ -48,6 +56,7 @@ jobs:
           name: intel-build-diagnostics
           path: |
             intel-build/macos-binary-audit.json
+            intel-build/audio-tools-audit.json
             intel-build/bundled-models.jsonl
           if-no-files-found: ignore
           retention-days: 14

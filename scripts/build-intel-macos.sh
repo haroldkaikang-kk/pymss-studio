@@ -10,10 +10,17 @@ export PYMSS_BUILD_TARGET=macos-x86_64
 export PYMSS_BUILD_VARIANT=intel-monterey-cpu
 export PYMSS_BUILD_OFFICIAL=false
 export PYMSS_BUILD_UPDATE_SUPPORTED=false
-python3 scripts/prepare-intel-runtime.py
-PYMSS_MACOS_TOOLS_ARCH=x86_64 bash scripts/prepare-macos-bundled-tools.sh intel-build/bin
-pnpm install --frozen-lockfile
-pnpm tauri build --target x86_64-apple-darwin --bundles app --config src-tauri/tauri.intel.conf.json
+stage="${1:-all}"
+case "$stage" in all|build|verify) ;; *) echo "Unknown build stage: $stage" >&2; exit 1 ;; esac
+if [[ "$stage" == all ]]; then
+  python3 scripts/prepare-intel-runtime.py
+  bash scripts/prepare-intel-tools.sh
+fi
+if [[ "$stage" != verify ]]; then
+  pnpm install --frozen-lockfile
+  pnpm tauri build --target x86_64-apple-darwin --bundles app --config src-tauri/tauri.intel.conf.json
+fi
+[[ "$stage" != build ]] || exit 0
 app_path="$PWD/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Pymss Studio Intel.app"
 python3 scripts/audit-intel-macos.py "$app_path" > intel-build/macos-binary-audit.json
 SIGN_IDENTITY=- bash scripts/resign-macos-app.sh "$app_path"
