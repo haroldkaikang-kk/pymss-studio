@@ -27,7 +27,7 @@ test('normal result actions keep both page actions directly available', () => {
 
 test('selection mode removes the misleading row expansion affordance', () => {
   assert.ok(template.includes("'result-row__main--selecting': selecting"))
-  assert.ok(template.includes('v-if="!selecting"\n            class="result-row__toggle"'))
+  assert.match(template, /v-if="!selecting"\s+class="result-row__toggle"/)
   assert.ok(style.includes('.result-row__main--selecting'))
 })
 
