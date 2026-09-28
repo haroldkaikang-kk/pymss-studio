@@ -12,6 +12,15 @@ def main():
     for path in root.rglob("*"):
         if not path.is_file() or path.is_symlink():
             continue
+        # Most runtime files are Python sources or headers. Read the magic first
+        # instead of spawning tens of thousands of `file` processes on the Mac.
+        with path.open("rb") as stream:
+            magic = stream.read(4)
+        if magic not in {b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe",
+                         b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
+                         b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+                         b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"}:
+            continue
         description = subprocess.check_output(["file", "-b", str(path)], text=True)
         if "Mach-O" not in description:
             continue
