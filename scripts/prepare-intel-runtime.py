@@ -24,6 +24,9 @@ def main():
     if len(candidates) != 1:
         raise SystemExit(f"Expected exactly one Intel Python runtime under {downloads}")
     shutil.copytree(candidates[0].parent.parent, destination, symlinks=True)
+    # This private copy belongs to the app, not uv's managed installation.
+    # Keep uv's original protected while allowing dependencies in the bundle.
+    (destination / "lib" / "python3.10" / "EXTERNALLY-MANAGED").unlink(missing_ok=True)
     python = destination / "bin" / "python3"
     env = {**os.environ, "PYTHONHOME": str(destination), "PYTHONDONTWRITEBYTECODE": "1"}
     subprocess.run([str(python), "-m", "ensurepip", "--upgrade"], env=env, check=True)
