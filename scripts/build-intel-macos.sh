@@ -23,11 +23,17 @@ fi
 [[ "$stage" != build ]] || exit 0
 app_path="$PWD/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Pymss Studio Intel.app"
 python3 scripts/audit-intel-macos.py "$app_path" > intel-build/macos-binary-audit.json
-SIGN_IDENTITY=- bash scripts/resign-macos-app.sh "$app_path"
-codesign --verify --deep --strict "$app_path"
 resources="$app_path/Contents/Resources"
+export PYTHONDONTWRITEBYTECODE=1
+export PYMSS_STUDIO_RUNTIME_ENVS_DIR="$PWD/intel-build/smoke-runtime-envs"
+export PYMSS_STUDIO_ACTIVE_RUNTIME_FILE="$PYMSS_STUDIO_RUNTIME_ENVS_DIR/active-runtime.json"
+export PYMSS_STUDIO_BUNDLED_RUNTIME_ENVS_DIR="$resources/python-runtime/runtime-envs"
 PYTHONHOME="$resources/python-runtime" "$resources/python-runtime/bin/python3" "$resources/python/worker.py" env_info
 PYTHONHOME="$resources/python-runtime" "$resources/python-runtime/bin/python3" "$resources/python/worker.py" list_models > intel-build/bundled-models.jsonl
+# Seal resources only after Python smoke checks, so generated files cannot
+# invalidate the signature on the final archive.
+SIGN_IDENTITY=- bash scripts/resign-macos-app.sh "$app_path"
+codesign --verify --deep --strict "$app_path"
 ditto -c -k --sequesterRsrc --keepParent "$app_path" intel-build/Pymss-Studio-Intel-Monterey-candidate.zip
 echo "构建检查通过；仍需在 macOS 12.7.6 上启动、试听并验收。"
 echo "$PWD/intel-build/Pymss-Studio-Intel-Monterey-candidate.zip"
