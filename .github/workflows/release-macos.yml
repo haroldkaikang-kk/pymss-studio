@@ -80,6 +80,24 @@ jobs:
           rsync -a --exclude '__pycache__' --exclude '*.pyc' python/ src-tauri/resources/python/
           cp -R python-runtime src-tauri/resources/python-runtime
           bash scripts/prepare-macos-bundled-tools.sh src-tauri/resources/bin
+          test -s src-tauri/resources/bin/THIRD_PARTY_TOOLS.txt
+          PREPARED_ARIA2=src-tauri/resources/bin/aria2c
+          while IFS= read -r DEP; do
+            case "$DEP" in
+              /usr/lib/*|/System/Library/*) ;;
+              @loader_path/*)
+                RESOLVED="$(dirname "$PREPARED_ARIA2")/${DEP#@loader_path/}"
+                if [ ! -f "$RESOLVED" ]; then
+                  echo "Prepared aria2c dependency is missing: $DEP" >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "Prepared aria2c still has a non-relocatable dependency: $DEP" >&2
+                exit 1
+                ;;
+            esac
+          done < <(otool -L "$PREPARED_ARIA2" | tail -n +2 | awk '{print $1}')
 
       - name: Build Tauri app bundle
         working-directory: .

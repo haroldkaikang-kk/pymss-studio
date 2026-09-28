@@ -158,12 +158,24 @@ resolve_dependency() {
 declare -a pending_dependencies=()
 declare -a known_dependency_sources=()
 declare -a aria2_runtime_source_manifest=()
+pending_dependency_count=0
+pending_dependency_cursor=0
+known_dependency_source_count=0
+aria2_runtime_manifest_count=0
 
 is_known_dependency_source() {
   local source="$1"
-  local known
-  for known in "${known_dependency_sources[@]}" "${pending_dependencies[@]}"; do
-    if [[ "$known" == "$source" ]]; then
+  local index
+
+  # Bash 3.2 treats an explicitly declared empty array as unset under `set -u`.
+  # Indexed iteration avoids expanding `${array[@]}` until an element exists.
+  for ((index = 0; index < known_dependency_source_count; index += 1)); do
+    if [[ "${known_dependency_sources[$index]}" == "$source" ]]; then
+      return 0
+    fi
+  done
+  for ((index = 0; index < pending_dependency_count; index += 1)); do
+    if [[ "${pending_dependencies[$index]}" == "$source" ]]; then
       return 0
     fi
   done
@@ -185,7 +197,8 @@ queue_dependency() {
     exit 1
   fi
   if ! is_known_dependency_source "$source"; then
-    pending_dependencies+=("$source")
+    pending_dependencies[$pending_dependency_count]="$source"
+    pending_dependency_count=$((pending_dependency_count + 1))
   fi
 }
 
@@ -196,9 +209,9 @@ bundle_aria2_dependencies() {
     queue_dependency "$dependency" "$DEST_DIR/aria2c"
   done < <(macho_dependencies "$DEST_DIR/aria2c")
 
-  while ((${#pending_dependencies[@]} > 0)); do
-    source="${pending_dependencies[0]}"
-    pending_dependencies=("${pending_dependencies[@]:1}")
+  while ((pending_dependency_cursor < pending_dependency_count)); do
+    source="${pending_dependencies[$pending_dependency_cursor]}"
+    pending_dependency_cursor=$((pending_dependency_cursor + 1))
     destination="$DEST_DIR/lib/$(basename "$source")"
 
     if [[ -f "$destination" ]] && ! cmp -s "$source" "$destination"; then
@@ -209,10 +222,10 @@ bundle_aria2_dependencies() {
       cp -L "$source" "$destination"
       chmod u+w "$destination"
     fi
-    known_dependency_sources+=("$source")
-    aria2_runtime_source_manifest+=(
-      "$(basename "$source") (source SHA-256: $(shasum -a 256 "$source" | awk '{print $1}'))"
-    )
+    known_dependency_sources[$known_dependency_source_count]="$source"
+    known_dependency_source_count=$((known_dependency_source_count + 1))
+    aria2_runtime_source_manifest[$aria2_runtime_manifest_count]="$(basename "$source") (source SHA-256: $(shasum -a 256 "$source" | awk '{print $1}'))"
+    aria2_runtime_manifest_count=$((aria2_runtime_manifest_count + 1))
 
     while IFS= read -r next_dependency; do
       queue_dependency "$next_dependency" "$source"
@@ -222,7 +235,7 @@ bundle_aria2_dependencies() {
 
 patch_macho_dependencies() {
   local binary="$1"
-  local dependency base replacement
+  local dependency base replacement rpath
   base="$(basename "$binary")"
 
   if [[ "$binary" == "$DEST_DIR/lib/"*.dylib ]]; then
@@ -243,6 +256,14 @@ patch_macho_dependencies() {
     fi
     install_name_tool -change "$dependency" "$replacement" "$binary"
   done < <(macho_dependencies "$binary")
+
+  # Homebrew bottles may retain absolute search paths even after every @rpath dependency has
+  # been rewritten above. They are unnecessary in the app bundle and leak the build host path.
+  while IFS= read -r rpath; do
+    if is_homebrew_dependency "$rpath"; then
+      install_name_tool -delete_rpath "$rpath" "$binary"
+    fi
+  done < <(macho_rpaths "$binary")
 }
 
 assert_portable_macho() {
@@ -309,7 +330,15 @@ done < <(find "$DEST_DIR" -type f -print0)
 "$DEST_DIR/aria2c" --version >/dev/null
 
 HOMEBREW_RUNTIME_VERSIONS="$(brew list --versions zlib expat sqlite c-ares | sed 's/^/  - /')"
-ARIA2_RUNTIME_MANIFEST="$(printf '  - %s\n' "${aria2_runtime_source_manifest[@]}")"
+if ((aria2_runtime_manifest_count == 0)); then
+  echo "aria2c did not produce a bundled runtime dependency manifest." >&2
+  exit 1
+fi
+ARIA2_RUNTIME_MANIFEST="$(
+  for ((index = 0; index < aria2_runtime_manifest_count; index += 1)); do
+    printf '  - %s\n' "${aria2_runtime_source_manifest[$index]}"
+  done
+)"
 
 cat > "$DEST_DIR/THIRD_PARTY_TOOLS.txt" <<EOF
 This directory contains self-contained command-line tools bundled for Pymss Studio macOS releases.
@@ -342,3 +371,5 @@ The release build verifies each download by SHA-256 and rejects binaries that
 contain host-specific dynamic-library paths. aria2c runtime libraries are copied
 from Homebrew and rewritten to app-local @loader_path references.
 EOF
+
+echo "Prepared portable macOS tools in $DEST_DIR"
