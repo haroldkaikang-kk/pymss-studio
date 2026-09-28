@@ -333,7 +333,8 @@ fn is_bundled_runtime_python_path(file: &Path, python_path: &str) -> AppResult<b
     .filter_map(|candidate| candidate.canonicalize().ok())
     .any(|candidate| candidate == python);
     if bootstrap_matches {
-        return Ok(backend == "mlx");
+        return Ok(backend == "mlx"
+            || (cfg!(all(target_os = "macos", target_arch = "x86_64")) && backend == "cpu"));
     }
     let Some(env_dir) = python.parent().and_then(Path::parent) else {
         return Ok(false);
@@ -1721,7 +1722,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bundled_bootstrap_pointer_for_non_mlx_backend() {
+    fn bundled_cpu_bootstrap_is_only_supported_on_intel_macos() {
         let root = temp_root("bundled-invalid-bootstrap");
         let runtime = root.join("python-runtime");
         let python = runtime.join("bin").join("python3");
@@ -1729,11 +1730,11 @@ mod tests {
         fs::write(&python, "stub").unwrap();
         let active = write_bundled_pointer(&root, "cpu", "../bin/python3");
 
-        assert!(!super::is_bundled_runtime_python_path(
+        assert_eq!(super::is_bundled_runtime_python_path(
             &active,
             &fs::canonicalize(&python).unwrap().to_string_lossy(),
         )
-        .unwrap());
+        .unwrap(), cfg!(all(target_os = "macos", target_arch = "x86_64")));
         let _ = fs::remove_dir_all(root);
     }
 

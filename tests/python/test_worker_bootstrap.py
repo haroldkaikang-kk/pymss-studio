@@ -578,6 +578,7 @@ class BundledRuntimeFallbackTests(unittest.TestCase):
         with mock.patch.object(worker_bootstrap, "RUNTIME_ENVS_DIR", self.user_envs), \
              mock.patch.object(worker_bootstrap, "ACTIVE_RUNTIME_FILE", self.user_envs / "active-runtime.json"), \
              mock.patch.object(worker_bootstrap, "BUNDLED_RUNTIME_ENVS_DIR", self.bundled_envs), \
+             mock.patch.object(worker_bootstrap.platform, "machine", return_value="arm64"), \
              mock.patch.object(sys, "platform", "darwin"):
             state = worker_bootstrap._read_runtime_state()
             target = worker_bootstrap._target_runtime_from_payload({}, "mlx")
@@ -588,6 +589,19 @@ class BundledRuntimeFallbackTests(unittest.TestCase):
         self.assertIsNotNone(target)
         # Windows may spell the same temporary directory through its 8.3 alias
         # after resolving the relative bundled-runtime path.
+        self.assertEqual(target[3].resolve(), self.bootstrap_python.resolve())
+
+    def test_packaged_cpu_is_used_on_intel_macos(self):
+        (self.bundled_envs / "active-runtime.json").write_text(json.dumps({
+            "backend": "cpu", "pythonPath": "../bin/python3",
+        }), encoding="utf-8")
+        with mock.patch.object(worker_bootstrap, "RUNTIME_ENVS_DIR", self.user_envs), \
+             mock.patch.object(worker_bootstrap, "ACTIVE_RUNTIME_FILE", self.user_envs / "active-runtime.json"), \
+             mock.patch.object(worker_bootstrap, "BUNDLED_RUNTIME_ENVS_DIR", self.bundled_envs), \
+             mock.patch.object(worker_bootstrap.platform, "machine", return_value="x86_64"), \
+             mock.patch.object(sys, "platform", "darwin"):
+            target = worker_bootstrap._target_runtime_from_payload({}, "cpu")
+        self.assertIsNotNone(target)
         self.assertEqual(target[3].resolve(), self.bootstrap_python.resolve())
 
     def test_packaged_mlx_remains_listed_when_user_cpu_runtime_is_active(self):

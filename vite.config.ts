@@ -5,6 +5,12 @@ import Components from 'unplugin-vue-components/vite'
 import { NaiveUiResolver } from 'unplugin-vue-components/resolvers'
 
 export default defineConfig({
+  build: {
+    // Conservative syntax baseline. Runtime APIs, CSS and native playback
+    // still require verification with Monterey's Safari/WebKit 17.6.
+    target: 'safari15',
+    cssTarget: 'safari15',
+  },
   plugins: [
     vue(),
     Components({

@@ -232,6 +232,7 @@ def _resolve_install_requirements(
     runtime: RuntimeContext | None = None,
 ) -> list[str]:
     runtime = runtime or _runtime_context()
+    from worker_bootstrap import _intel_pip_args
     _run_process(
         [
             str(runtime.executable),
@@ -245,6 +246,7 @@ def _resolve_install_requirements(
             str(report_path),
             "--index-url",
             index_url,
+            *_intel_pip_args(),
             requirement,
         ],
         name,

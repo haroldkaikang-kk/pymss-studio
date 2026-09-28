@@ -1,0 +1,53 @@
+name: Build Intel Monterey App
+
+on:
+  push:
+    branches: [intel-monterey]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intel-monterey-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.33.2'
+          run_install: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Prepare Rust target
+        run: rustup target add x86_64-apple-darwin
+      - name: Prepare audio tool dependencies
+        run: brew install --formula zlib expat sqlite c-ares
+      - name: Build patched engine wheels
+        run: bash scripts/build-intel-engine-wheels.sh
+      - name: Build and verify Intel app
+        run: bash scripts/build-intel-macos.sh
+      - name: Upload installable app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pymss-Studio-Intel-Monterey
+          path: intel-build/Pymss-Studio-Intel-Monterey-candidate.zip
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intel-build-diagnostics
+          path: |
+            intel-build/macos-binary-audit.json
+            intel-build/bundled-models.jsonl
+          if-no-files-found: ignore
+          retention-days: 14

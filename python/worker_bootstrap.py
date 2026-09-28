@@ -49,8 +49,28 @@ PACKAGE_IMPORT_NAMES = {
 }
 
 
+def _intel_macos() -> bool:
+    return sys.platform == "darwin" and platform.machine().lower() == "x86_64"
+
+
 def _manifest() -> dict[str, Any]:
-    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    path = MANIFEST_PATH.with_name("runtime-manifest-intel.json") if _intel_macos() else MANIFEST_PATH
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _intel_pip_args() -> list[str]:
+    if not _intel_macos():
+        return []
+    root = MANIFEST_PATH.parent
+    return ["--constraint", str(root / "requirements-intel-lock.txt"),
+            "--find-links", str(root / "intel-wheels")]
+
+
+def _core_target_version(name: str) -> str:
+    if _intel_macos():
+        requirement = Requirement(_manifest()["common"][name])
+        return next(spec.version for spec in requirement.specifier if spec.operator == "==")
+    return _latest_pypi_version(name)
 
 
 def _pin_manifest_requirement(requirement: Any, version: str) -> str:
@@ -1316,7 +1336,7 @@ def cmd_runtime_core_versions(payload: dict[str, Any]) -> int:
     packages: dict[str, dict[str, str | None]] = {}
     for name in ("pymss", "pymss-core"):
         try:
-            packages[name] = {"latestVersion": _latest_pypi_version(name)}
+            packages[name] = {"latestVersion": _core_target_version(name)}
         except Exception as exc:
             packages[name] = {"latestVersion": None, "error": str(exc)}
     _emit("runtime_core_versions", {"packages": packages})
@@ -1713,6 +1733,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
 
     def run_pip(args: list[str], stage: str, package_index: str | None = None) -> None:
         command = [str(env_python), "-m", "pip", "install", "--no-cache-dir"]
+        command.extend(_intel_pip_args())
         if stage == "pymss":
             command.append("--upgrade")
         if stage in {"common", "pymss"}:
@@ -1948,14 +1969,14 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
     target_pymss_version = installed_repair_version("pymss", "pymssVersion")
     if not target_pymss_version:
         try:
-            target_pymss_version = _latest_pypi_version("pymss")
+            target_pymss_version = _core_target_version("pymss")
         except Exception as exc:
             from worker_protocol import emit_error
             return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss version from PyPI: {exc}", task_id=task_id, recoverable=True)
     target_pymss_core_version = installed_repair_version("pymss-core", "pymssCoreVersion")
     if not target_pymss_core_version:
         try:
-            target_pymss_core_version = _latest_pypi_version("pymss-core")
+            target_pymss_core_version = _core_target_version("pymss-core")
         except Exception as exc:
             from worker_protocol import emit_error
             return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss-core version from PyPI: {exc}", task_id=task_id, recoverable=True)
@@ -2012,6 +2033,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         # Exact core pins select the requested versions without --upgrade. This keeps already
         # satisfied dependencies, including manifest requirements, at their installed versions.
         command = [str(python_path), "-m", "pip", "install", "--no-cache-dir", "--only-binary=:all:", "--prefer-binary"]
+        command.extend(_intel_pip_args())
         command.extend(["--constraint", str(constraints_path)])
         if index_url:
             command.extend(["--index-url", index_url])
@@ -2085,6 +2107,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
                 str(python_path), "-m", "pip", "install", "--ignore-installed", "--no-deps",
                 "--no-cache-dir", "--only-binary=:all:", "--prefer-binary",
             ]
+            repair_command.extend(_intel_pip_args())
             if index_url:
                 repair_command.extend(["--index-url", index_url])
             repair_command.extend(repair_requirements)
@@ -2107,6 +2130,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
                 str(python_path), "-m", "pip", "install", "--force-reinstall", "--no-deps",
                 "--no-cache-dir", "--only-binary=:all:", "--prefer-binary",
             ]
+            force_command.extend(_intel_pip_args())
             force_command.extend(["--constraint", str(constraints_path)])
             if index_url:
                 force_command.extend(["--index-url", index_url])

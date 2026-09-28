@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": "2026.09.3",
+  "python": "3.10",
+  "bootstrap": {"requests": "requests[socks]==2.34.2"},
+  "common": {
+    "av": "av==14.2.0",
+    "librosa": "librosa==0.10.2.post1",
+    "numpy": "numpy==1.26.4",
+    "filelock": "filelock==4.0.5",
+    "fsspec": "fsspec==2026.9.0",
+    "jinja2": "jinja2==3.1.6",
+    "networkx": "networkx==3.4.2",
+    "sympy": "sympy==1.14.0",
+    "typing-extensions": "typing-extensions==4.16.0",
+    "requests": "requests[socks]==2.34.2",
+    "pyyaml": "pyyaml==6.0.3",
+    "tqdm": "tqdm==4.70.1",
+    "pymss": "pymss[proxy]==2.1.7+intel1",
+    "pymss-core": "pymss-core==0.1.10+intel1"
+  },
+  "backends": {
+    "cpu": {"platforms": ["darwin"], "torch": {"requirement": "torch==2.2.2"}}
+  }
+}

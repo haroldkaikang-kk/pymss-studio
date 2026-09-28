@@ -1,0 +1,49 @@
+diff --git a/pymss_core/modules/look2hear/apollo.py b/pymss_core/modules/look2hear/apollo.py
+index 51a0c53..fe0ed9a 100644
+--- a/pymss_core/modules/look2hear/apollo.py
++++ b/pymss_core/modules/look2hear/apollo.py
+@@ -28,7 +28,9 @@ class RMSNorm(nn.Module):
+     def forward(self, input):
+         B, N, T = input.shape
+         assert N % self.groups == 0
+-        if self.groups == 1 and not torch.is_grad_enabled():
++        # torch.nn.functional.rms_norm is absent on Intel macOS's PyTorch 2.2.
++        # The existing float32 formula below is also the inference fallback.
++        if self.groups == 1 and not torch.is_grad_enabled() and hasattr(F, "rms_norm"):
+             x = input.transpose(1, 2)
+             if input.is_cuda and input.dtype in (torch.float16, torch.bfloat16): weight = _cached_inference_tensor(self, 'rms_weight', self.weight, input, self.weight._version); return F.rms_norm(x, (N,), weight, self.eps).transpose(1, 2)
+             return F.rms_norm(x, (N,), None, self.eps).transpose(1, 2).type_as(input) * self.weight.reshape(1, -1, 1)
+@@ -207,4 +209,4 @@ class Apollo(MpsBackendMixin, nn.Module):
+         B, nch, nsample = input.shape
+         feature = self.net(self.feature_extractor(input))
+         est_spec = self._estimate_spec_packed(feature, B * nch) if self._use_packed_band_ops() else self._estimate_spec_by_band(feature, B * nch)
+-        return torch.istft(est_spec.to(dtype=torch.complex64), n_fft=self.win, hop_length=self.stride, window=self._window(input), length=nsample).view(B, nch, -1)
+\ No newline at end of file
++        return torch.istft(est_spec.to(dtype=torch.complex64), n_fft=self.win, hop_length=self.stride, window=self._window(input), length=nsample).view(B, nch, -1)
+diff --git a/pyproject.toml b/pyproject.toml
+index 9218b8a..edf8a47 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "pymss-core"
+-version = "0.1.10"
++version = "0.1.10+intel1"
+ description = "Core model, configuration, and checkpoint package for music source separation."
+ readme = { file = "README.md", content-type = "text/markdown" }
+ requires-python = ">=3.10"
+@@ -36,9 +36,11 @@ classifiers = [
+     "Operating System :: OS Independent",
+ ]
+ dependencies = [
+-    "numpy>=1.26",
++    "numpy==1.26.4; sys_platform == 'darwin' and platform_machine == 'x86_64'",
++    "numpy>=1.26; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+     "pyyaml>=6.0.1",
+-    "torch>=2.7.1",
++    "torch==2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
++    "torch>=2.7.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+ ]
+ 
+ [project.optional-dependencies]
