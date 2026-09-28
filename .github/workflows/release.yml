@@ -111,17 +111,31 @@ jobs:
           requested_auto_update="${{ github.event_name == 'workflow_dispatch' && inputs.allow_auto_update == true }}"
           previous_tag="$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | grep -v "^${release_tag}$" | head -n 1 || true)"
           runtime_compatible=false
-          if [[ -n "$previous_tag" ]] && git diff --quiet "$previous_tag" "$GITHUB_SHA" -- \
-              python/ \
-              scripts/prepare-python-runtime.ps1 \
-              scripts/prepare-python-runtime.sh \
-              scripts/prune-python-runtime.ps1 \
-              scripts/prune-python-runtime.sh \
-              src-tauri/src/python \
-              src-tauri/src/storage.rs \
-              src-tauri/tauri.conf.json \
-              installer/pymss-studio.iss; then
-            runtime_compatible=true
+          if [[ -n "$previous_tag" ]] && git cat-file -e "$previous_tag:python/runtime-manifest.json"; then
+            previous_manifest="$(mktemp)"
+            git show "$previous_tag:python/runtime-manifest.json" > "$previous_manifest"
+            base_layout_args=()
+            if ! git diff --quiet "$previous_tag" "$GITHUB_SHA" -- \
+                scripts/prepare-python-runtime.ps1 \
+                scripts/prepare-python-runtime.sh \
+                scripts/prune-python-runtime.ps1 \
+                scripts/prune-python-runtime.sh; then
+              base_layout_args+=(--base-layout-changed)
+            fi
+            compatibility_status=0
+            python3 scripts/check-runtime-update-compatibility.py \
+              "${base_layout_args[@]}" \
+              "$previous_manifest" python/runtime-manifest.json || compatibility_status=$?
+            rm -f "$previous_manifest"
+            if [[ "$compatibility_status" -gt 1 ]]; then
+              echo "Unable to determine runtime update compatibility" >&2
+              exit "$compatibility_status"
+            fi
+            if [[ "$compatibility_status" -eq 0 ]] && git diff --quiet "$previous_tag" "$GITHUB_SHA" -- \
+                src-tauri/tauri.conf.json \
+                installer/pymss-studio.iss; then
+              runtime_compatible=true
+            fi
           fi
           if [[ "$requested_auto_update" == "true" && "$runtime_compatible" == "true" ]]; then
             echo "RELEASE_AUTO_UPDATE_SUPPORTED=true" >> "$GITHUB_ENV"

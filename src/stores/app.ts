@@ -51,6 +51,7 @@ export type RuntimeInfo = {
     torchVersion?: string | null
     torchBackend?: string | null
     pythonPath?: string
+    overlayPath?: string
     logPath?: string
     packages?: Record<string, boolean>
     packageVersions?: Record<string, string | null>
@@ -87,6 +88,7 @@ export type InstalledRuntime = {
   torchBackend?: string | null
   acceleratorAvailable?: boolean
   pythonPath?: string
+  overlayPath?: string
   logPath?: string
   packages?: Record<string, boolean>
   packageVersions?: Record<string, string | null>
@@ -568,6 +570,7 @@ export const useAppStore = defineStore('app', () => {
         void checkEnv()
         void checkRuntimeInfo()
         void loadRuntimeCoreVersions()
+        void import('@/stores/model').then(({ useModelStore }) => useModelStore().loadModels())
       } else if (event?.type === 'runtime_core_update_started') {
         runtimeCoreUpdateStatus.value = 'updating'
         runtimeCoreUpdateMode.value = event.payload?.mode === 'repair' ? 'repair' : 'update'

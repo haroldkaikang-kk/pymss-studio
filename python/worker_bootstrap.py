@@ -43,6 +43,7 @@ ALLOW_DEBUG_RUNTIME_OVERRIDE = os.environ.get("PYMSS_STUDIO_ALLOW_DEBUG_RUNTIME_
 # environment would read as permanently incomplete. Both detection paths — in-process and the
 # probe script below — share this table so they can never disagree.
 PACKAGE_IMPORT_NAMES = {
+    "pysocks": "socks",
     "pyyaml": "yaml",
     "pymss-core": "pymss_core",
     "typing-extensions": "typing_extensions",
@@ -61,6 +62,17 @@ def _pin_manifest_requirement(requirement: Any, version: str) -> str:
     extras_match = re.search(r"(\[[^\]]+\])", spec)
     extras = extras_match.group(1) if extras_match else ""
     return f"{name}{extras}=={version}"
+
+
+def _manifest_pinned_version(manifest: dict[str, Any], name: str) -> str:
+    try:
+        requirement = Requirement(str(manifest.get("common", {}).get(name) or ""))
+    except Exception:
+        return ""
+    for specifier in requirement.specifier:
+        if specifier.operator in {"==", "==="} and "*" not in specifier.version:
+            return specifier.version
+    return ""
 
 
 def _supported_backend(backend: str, manifest: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]] | None:
@@ -132,6 +144,20 @@ def _resolve_runtime_state_from(file: Path) -> dict[str, Any] | None:
                 return None
         elif not p.is_file():
             return None
+    overlay_path = state.get("overlayPath")
+    if overlay_path:
+        overlay = Path(str(overlay_path))
+        if not overlay.is_absolute():
+            overlay = file.parent / overlay
+        try:
+            overlay = overlay.resolve()
+        except OSError:
+            state.pop("overlayPath", None)
+        else:
+            if overlay.is_dir() and _path_is_within(overlay, _runtime_overlay_root()):
+                state["overlayPath"] = str(overlay)
+            else:
+                state.pop("overlayPath", None)
     state.pop("source", None)
     return state
 
@@ -591,7 +617,22 @@ def _env_size_targets(manifest: dict[str, Any]) -> dict[str, Path]:
     return targets
 
 
-def _probe_python_runtime(python_path: Path, extras: list[str] | None = None) -> dict[str, Any]:
+def _probe_environment(overlay_path: Path | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env["PYTHONNOUSERSITE"] = "1"
+    if overlay_path:
+        env["PYTHONPATH"] = str(overlay_path)
+    else:
+        env.pop("PYTHONPATH", None)
+    return env
+
+
+def _probe_python_runtime(
+    python_path: Path,
+    extras: list[str] | None = None,
+    overlay_path: Path | None = None,
+) -> dict[str, Any]:
     extras = extras or []
     package_names = list(_manifest()["common"].keys()) + extras
     script = """
@@ -624,7 +665,12 @@ print(json.dumps(result, ensure_ascii=False))
 """.replace("%PACKAGES%", repr(json.dumps(package_names))) \
    .replace("%MAPPING%", repr(json.dumps(PACKAGE_IMPORT_NAMES)))
     output = subprocess.check_output(
-        [str(python_path), "-c", script], text=True, encoding="utf-8", errors="replace", stderr=subprocess.PIPE,
+        [str(python_path), "-c", script],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stderr=subprocess.PIPE,
+        env=_probe_environment(overlay_path),
     )
     result = json.loads(output)
     if (
@@ -646,7 +692,11 @@ print(json.dumps(result, ensure_ascii=False))
     return result
 
 
-def _probe_python_package_versions(python_path: Path, package_names: list[str]) -> dict[str, str | None]:
+def _probe_python_package_versions(
+    python_path: Path,
+    package_names: list[str],
+    overlay_path: Path | None = None,
+) -> dict[str, str | None]:
     if not python_path.is_file() or not package_names:
         return {}
     script = """
@@ -662,64 +712,23 @@ for name in names:
 print(json.dumps(result, ensure_ascii=False))
 """.replace("%NAMES%", repr(json.dumps(package_names)))
     try:
-        output = subprocess.check_output([str(python_path), "-c", script], text=True, encoding="utf-8", errors="replace")
+        output = subprocess.check_output(
+            [str(python_path), "-c", script],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_probe_environment(overlay_path),
+        )
         data = json.loads(output.strip() or "{}")
         return {name: (str(data.get(name)) if data.get(name) else None) for name in package_names}
     except Exception:
         return {}
 
 
-def _runtime_core_missing_records(python_path: Path) -> dict[str, str]:
-    """Return core package versions whose wheel RECORD files were pruned or lost.
-
-    Older bundled runtimes intentionally removed most ``*.dist-info`` files to reduce
-    package size.  That makes pip unable to uninstall the old ``pymss`` distribution
-    during an in-place core update.  Inspect only the two packages managed by the core
-    update flow; never infer that a large accelerator package needs a reinstall.
-    """
-    if not python_path.is_file():
-        return {}
-    script = """
-import json
-from importlib import metadata
-
-result = {}
-for name in ("pymss", "pymss-core"):
-    try:
-        distribution = metadata.distribution(name)
-        record = distribution.read_text("RECORD")
-        if not record:
-            result[name] = distribution.version
-    except metadata.PackageNotFoundError:
-        pass
-print(json.dumps(result, ensure_ascii=False))
-"""
-    try:
-        output = subprocess.check_output(
-            [str(python_path), "-c", script],
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stderr=subprocess.PIPE,
-            timeout=30,
-        )
-        data = json.loads(output.strip() or "{}")
-        if not isinstance(data, dict):
-            return {}
-        return {
-            name: str(version)
-            for name, version in data.items()
-            if name in {"pymss", "pymss-core"} and version
-        }
-    except (OSError, ValueError, subprocess.SubprocessError):
-        # Metadata inspection is a repair aid.  If an old interpreter cannot answer,
-        # let the normal pip command produce its usual diagnostic instead.
-        return {}
-
-
 def _installed_envs(
     manifest: dict[str, Any], *, repair: bool = True,
     active_python: Path | None = None, active_probe: dict[str, Any] | None = None,
+    active_state: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     def live_probe_for(python_path: Path, names: list[str]) -> dict[str, Any] | None:
         # A request may ask about a different backend than the active one. Reuse only
@@ -737,13 +746,18 @@ def _installed_envs(
                 }
         return None
 
-    def core_versions(python_path: Path) -> dict[str, str | None]:
+    def core_versions(python_path: Path, state: dict[str, Any] | None = None) -> dict[str, str | None]:
         names = ["pymss", "pymss-core"]
         probed = live_probe_for(python_path, names)
         if probed is not None:
             versions = probed["packageVersions"]
             return {name: str(versions[name]) if versions[name] else None for name in names}
-        return _probe_python_package_versions(python_path, names)
+        overlay = _overlay_path_from_state(state)
+        return (
+            _probe_python_package_versions(python_path, names, overlay)
+            if overlay
+            else _probe_python_package_versions(python_path, names)
+        )
 
     items: list[dict[str, Any]] = []
     seen_backends: set[str] = set()
@@ -768,7 +782,7 @@ def _installed_envs(
         if python_path.is_file() and state is None:
             state = _discover_runtime_state(backend, python_path, manifest, persist=repair, probed=probed)
         if state and python_path.is_file():
-            package_versions = core_versions(python_path)
+            package_versions = core_versions(python_path, state)
             items.append({
                 **state,
                 "backend": backend,
@@ -796,21 +810,31 @@ def _installed_envs(
         try:
             probed = live_probe_for(bundled_python, _manifest_requirement_names(manifest, bundled_backend))
             if probed is None:
-                probed = _probe_python_runtime(bundled_python, _backend_extra_names(manifest, bundled_backend))
+                overlay = _overlay_path_from_state(active_state) if active_state and _same_path(active_state.get("pythonPath"), bundled_python) else None
+                probed = (
+                    _probe_python_runtime(bundled_python, _backend_extra_names(manifest, bundled_backend), overlay)
+                    if overlay
+                    else _probe_python_runtime(bundled_python, _backend_extra_names(manifest, bundled_backend))
+                )
             if _runtime_probe_is_ready(bundled_backend, probed, manifest):
                 bundled_live_state = {
                     **bundled_state,
+                    **(active_state if active_state and _same_path(active_state.get("pythonPath"), bundled_python) else {}),
                     "packages": probed.get("packages"),
                     "packageVersions": probed.get("packageVersions"),
                     "torchBackend": probed.get("torchBackend"),
                 }
-                items.append({
+                effective_state = {
                     **bundled_state,
+                    **(active_state if active_state and _same_path(active_state.get("pythonPath"), bundled_python) else {}),
+                }
+                items.append({
+                    **effective_state,
                     "backend": bundled_backend,
                     "pythonPath": str(bundled_python),
                     "source": "bundled",
                     "health": _runtime_health(bundled_backend, bundled_live_state, manifest),
-                    "coreUpdateSupported": False,
+                    "coreUpdateSupported": repair,
                     "packages": probed.get("packages"),
                     "packageVersions": probed.get("packageVersions"),
                     "pymssVersion": probed.get("pymssVersion"),
@@ -839,18 +863,22 @@ def _installed_envs(
                 state = _discover_runtime_state(backend, bundled_python, manifest, persist=False, probed=probed)
             if not state:
                 continue
-            package_versions = core_versions(bundled_python)
-            items.append({
+            effective_state = {
                 **state,
+                **(active_state if active_state and _same_path(active_state.get("pythonPath"), bundled_python) else {}),
+            }
+            package_versions = core_versions(bundled_python, effective_state)
+            items.append({
+                **effective_state,
                 "backend": backend,
                 "pythonPath": str(bundled_python),
                 "source": "bundled",
-                "health": _runtime_health(backend, state, manifest),
-                "coreUpdateSupported": False,
-                "packageVersions": {**(state.get("packageVersions") or {}), **package_versions},
-                "pymssVersion": package_versions.get("pymss") or state.get("pymssVersion"),
-                "pymssCoreVersion": package_versions.get("pymss-core") or state.get("pymssCoreVersion"),
-                "pymssGraphAvailable": state.get("pymssGraphAvailable"),
+                "health": _runtime_health(backend, effective_state, manifest),
+                "coreUpdateSupported": repair,
+                "packageVersions": {**(effective_state.get("packageVersions") or {}), **package_versions},
+                "pymssVersion": package_versions.get("pymss") or effective_state.get("pymssVersion"),
+                "pymssCoreVersion": package_versions.get("pymss-core") or effective_state.get("pymssCoreVersion"),
+                "pymssGraphAvailable": effective_state.get("pymssGraphAvailable"),
             })
             seen_backends.add(backend)
     return items
@@ -869,6 +897,7 @@ def _envs_with_live_active(
     manifest: dict[str, Any],
     active_python: Path | None,
     active_probe: dict[str, Any] | None,
+    active_state: dict[str, Any] | None = None,
     *,
     repair: bool = True,
 ) -> list[dict[str, Any]]:
@@ -879,7 +908,13 @@ def _envs_with_live_active(
     environment was just probed for real, so prefer that answer over the recording. Idle
     environments keep their recorded state — probing each one would spawn an interpreter per
     environment on every refresh."""
-    environments = _installed_envs(manifest, repair=repair, active_python=active_python, active_probe=active_probe)
+    environments = _installed_envs(
+        manifest,
+        repair=repair,
+        active_python=active_python,
+        active_probe=active_probe,
+        active_state=active_state,
+    )
     if not active_probe or not active_python:
         return environments
     for entry in environments:
@@ -969,6 +1004,102 @@ def _is_bundled_bootstrap_python(path: Path) -> bool:
         return bool(bundled and _same_path(path.resolve(), bundled.resolve()))
     except OSError:
         return False
+
+
+def _runtime_overlay_root() -> Path:
+    return RUNTIME_ENVS_DIR / ".overlays"
+
+
+def _runtime_overlay_selection_path(backend: str) -> Path:
+    return _runtime_overlay_root() / backend / "active-overlay.json"
+
+
+def _overlay_path_from_state(state: dict[str, Any] | None) -> Path | None:
+    value = str((state or {}).get("overlayPath") or "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    return resolved if resolved.is_dir() and _path_is_within(resolved, _runtime_overlay_root()) else None
+
+
+def _registered_runtime_overlay(backend: str, python_path: Path) -> dict[str, Any] | None:
+    path = _runtime_overlay_selection_path(backend)
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(state, dict) or not _same_path(state.get("pythonPath"), python_path):
+        return None
+    overlay = _overlay_path_from_state(state)
+    if not overlay:
+        return None
+    return {**state, "overlayPath": str(overlay)}
+
+
+def _overlay_requirement_is_satisfied(requirement: str, installed_version: str | None) -> bool:
+    if not installed_version:
+        return False
+    try:
+        parsed = Requirement(requirement)
+        return not parsed.specifier or Version(installed_version) in parsed.specifier
+    except Exception:
+        return False
+
+
+def _overlay_requirements(
+    manifest: dict[str, Any],
+    backend: str,
+    base_versions: dict[str, str | None],
+    target_pymss_version: str,
+    target_pymss_core_version: str,
+) -> list[str]:
+    requirements = [
+        _pin_manifest_requirement(manifest.get("common", {}).get("pymss"), target_pymss_version),
+        f"pymss-core=={target_pymss_core_version}",
+    ]
+    for name, value in manifest.get("common", {}).items():
+        if name in {"pymss", "pymss-core"}:
+            continue
+        requirement = str(value)
+        if not _overlay_requirement_is_satisfied(requirement, base_versions.get(name)):
+            requirements.append(requirement)
+    for value in manifest.get("backends", {}).get(backend, {}).get("extras", []) or []:
+        requirement = str(value)
+        try:
+            name = Requirement(requirement).name
+        except Exception:
+            name = requirement
+        if not _overlay_requirement_is_satisfied(requirement, base_versions.get(name)):
+            requirements.append(requirement)
+    return requirements
+
+
+def _cleanup_runtime_overlays(backend: str, keep: set[Path]) -> None:
+    root = _runtime_overlay_root() / backend
+    if not root.is_dir():
+        return
+    try:
+        kept = {path.resolve() for path in keep}
+        candidates = sorted(
+            (path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    retained_old = False
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in kept:
+            continue
+        if not retained_old:
+            retained_old = True
+            continue
+        shutil.rmtree(candidate, ignore_errors=True)
 
 
 def _target_runtime_from_payload(payload: dict[str, Any], backend: str) -> tuple[dict[str, Any] | None, Path, Path, Path] | None:
@@ -1213,9 +1344,14 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
     live_probe_error: dict[str, str] | None = None
     active_probe: dict[str, Any] | None = None
     active_python = _runtime_command_path(Path(str(install_state.get("pythonPath")))) if install_state and install_state.get("pythonPath") else None
+    active_overlay = _overlay_path_from_state(install_state)
     if active_python and active_python.is_file():
         try:
-            probed = _probe_python_runtime(active_python, extra_names)
+            probed = (
+                _probe_python_runtime(active_python, extra_names, active_overlay)
+                if active_overlay
+                else _probe_python_runtime(active_python, extra_names)
+            )
             active_probe = probed
             packages = dict(probed.get("packages") or packages)
             package_versions = probed.get("packageVersions")
@@ -1259,7 +1395,13 @@ def _runtime_info_payload(payload: dict[str, Any], *, repair: bool = True) -> di
         pymss_version = package_versions.get("pymss")
     if not pymss_core_version and package_versions:
         pymss_core_version = package_versions.get("pymss-core")
-    environments = _envs_with_live_active(manifest, active_python, active_probe, repair=repair)
+    environments = _envs_with_live_active(
+        manifest,
+        active_python,
+        active_probe,
+        active_state=install_state,
+        repair=repair,
+    )
     if live_probe_error and active_python:
         for entry in environments:
             if _same_path(entry.get("pythonPath"), active_python):
@@ -1313,8 +1455,13 @@ def cmd_runtime_info(payload: dict[str, Any], *, repair: bool = True) -> int:
 
 def cmd_runtime_core_versions(payload: dict[str, Any]) -> int:
     del payload
+    manifest = _manifest()
     packages: dict[str, dict[str, str | None]] = {}
     for name in ("pymss", "pymss-core"):
+        pinned = _manifest_pinned_version(manifest, name)
+        if pinned:
+            packages[name] = {"latestVersion": pinned}
+            continue
         try:
             packages[name] = {"latestVersion": _latest_pypi_version(name)}
         except Exception as exc:
@@ -1400,9 +1547,15 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
     # active pointer between them, so honour the guard for both bundled and managed runtimes.
     if preserve_existing_pointer():
         return 0
+    registered_overlay = _registered_runtime_overlay(backend, python_path)
+    overlay_path = _overlay_path_from_state(state) or _overlay_path_from_state(registered_overlay)
     if _is_bundled_runtime_env(env_dir) or _is_bundled_bootstrap_python(python_path):
         try:
-            probed = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
+            probed = (
+                _probe_python_runtime(python_path, _backend_extra_names(manifest, backend), overlay_path)
+                if overlay_path
+                else _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
+            )
         except Exception as exc:
             from worker_protocol import emit_error
             return emit_error("RUNTIME_ACTIVATION_FAILED", f"Bundled runtime {backend} failed validation: {exc}", recoverable=True)
@@ -1414,26 +1567,23 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
                 f"acceleratorAvailable={probed.get('acceleratorAvailable')}",
                 recoverable=True,
             )
-        # Startup recovery is intentionally non-destructive.  The frontend may have inspected
-        # an empty pointer just before a user switched to a managed runtime.  In that mode leave
-        # the pointer untouched; the packaged active-runtime.json is the fallback for a genuinely
-        # empty user state, so no write or unlink is needed.
-        if not payload.get("onlyIfNoActive"):
-            try:
-                ACTIVE_RUNTIME_FILE.unlink()
-            except FileNotFoundError:
-                pass
         active = {
             **(state or {}),
+            **(registered_overlay or {}),
             "backend": backend,
             "pythonPath": str(python_path),
             "source": "bundled",
             "activatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        _write_runtime_state(active)
         _emit("runtime_activated", active)
         return 0
     try:
-        probed = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
+        probed = (
+            _probe_python_runtime(python_path, _backend_extra_names(manifest, backend), overlay_path)
+            if overlay_path
+            else _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
+        )
     except Exception as exc:
         from worker_protocol import emit_error
         return emit_error(
@@ -1454,6 +1604,7 @@ def cmd_activate_runtime(payload: dict[str, Any]) -> int:
     else:
         state = {
             **state,
+            **(registered_overlay or {}),
             "stateVersion": max(int(state.get("stateVersion") or 1), ENV_STATE_VERSION),
             "pythonVersion": probed.get("pythonVersion") or state.get("pythonVersion"),
             "torchVersion": probed.get("torchVersion"),
@@ -1511,8 +1662,11 @@ def cmd_delete_runtime(payload: dict[str, Any]) -> int:
         return emit_error("RUNTIME_DELETE_ACTIVE", f"Cannot delete the currently active runtime ({backend}). Switch to another environment first.")
     import shutil
     try:
+        owns_overlay = _registered_runtime_overlay(backend, python_path) is not None
         if env_dir.is_dir():
             shutil.rmtree(str(env_dir))
+        if owns_overlay:
+            shutil.rmtree(_runtime_overlay_root() / backend, ignore_errors=True)
         if active_python and _same_path(active_python, python_path):
             try:
                 ACTIVE_RUNTIME_FILE.unlink()
@@ -1902,21 +2056,18 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             task_id=task_id,
             recoverable=True,
         )
-    if _is_bundled_runtime_env(env_dir) or _is_bundled_bootstrap_python(python_path):
-        from worker_protocol import emit_error
-        return emit_error("RUNTIME_CORE_UPDATE_UNSUPPORTED", "Bundled runtime environments cannot be updated in place; install a user-managed environment first.", task_id=task_id, recoverable=True)
     if not python_path.is_file():
         from worker_protocol import emit_error
         return emit_error("RUNTIME_NOT_INSTALLED", f"Active runtime Python not found: {python_path}", task_id=task_id)
-    if _same_path(python_path, _bootstrap_python_path()):
-        from worker_protocol import emit_error
-        return emit_error("RUNTIME_CORE_UPDATE_UNSUPPORTED", "The app bootstrap Python runtime cannot be updated in place", task_id=task_id)
-    # Core update is only available for the currently active runtime
+    # Overlay activation changes the process import path, so only the active runtime may be
+    # migrated. The base environment itself remains immutable, including bundled runtimes.
     active = _read_runtime_state()
     active_python = _runtime_command_path(Path(str(active.get("pythonPath")))) if active and active.get("pythonPath") else None
     if not active_python or not _same_path(active_python, python_path):
         from worker_protocol import emit_error
         return emit_error("RUNTIME_CORE_UPDATE_INACTIVE", "Core update is only available for the currently active runtime. Please switch to this environment first.", task_id=task_id, recoverable=True)
+    if active.get("overlayPath"):
+        state = {**state, **active}
     manifest_status = _runtime_manifest_status(state.get("manifestVersion"), manifest.get("manifestVersion"))
     if manifest_status not in {"current", "older"} and not (
         repair_dependencies and manifest_status == "unknown"
@@ -1947,6 +2098,8 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
 
     target_pymss_version = installed_repair_version("pymss", "pymssVersion")
     if not target_pymss_version:
+        target_pymss_version = _manifest_pinned_version(manifest, "pymss")
+    if not target_pymss_version:
         try:
             target_pymss_version = _latest_pypi_version("pymss")
         except Exception as exc:
@@ -1954,12 +2107,16 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss version from PyPI: {exc}", task_id=task_id, recoverable=True)
     target_pymss_core_version = installed_repair_version("pymss-core", "pymssCoreVersion")
     if not target_pymss_core_version:
+        target_pymss_core_version = _manifest_pinned_version(manifest, "pymss-core")
+    if not target_pymss_core_version:
         try:
             target_pymss_core_version = _latest_pypi_version("pymss-core")
         except Exception as exc:
             from worker_protocol import emit_error
             return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss-core version from PyPI: {exc}", task_id=task_id, recoverable=True)
-    log_path = env_dir / "pymss-core-update.log"
+    overlay_backend_root = _runtime_overlay_root() / backend
+    overlay_backend_root.mkdir(parents=True, exist_ok=True)
+    log_path = overlay_backend_root / "pymss-core-update.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     operation = "repair runtime dependencies" if repair_dependencies else "update pymss core"
     log_path.write_text(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {operation} mirror={mirror}\n", encoding="utf-8")
@@ -1977,56 +2134,57 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         with log_path.open("a", encoding="utf-8", errors="replace") as file:
             file.write(f"[{stage}] {message}\n")
 
-    # Keep dependency resolution enabled so new dependencies introduced by pymss are installed,
-    # but constrain Torch to the build already installed in this backend.
-    torch_version = str((state or {}).get("torchVersion") or "").strip()
-    if not torch_version:
-        try:
-            torch_version = str(_probe_python_runtime(python_path).get("torchVersion") or "").strip()
-        except Exception:
-            torch_version = ""
+    try:
+        base_probe = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
+    except Exception:
+        base_probe = {}
+    torch_version = str((state or {}).get("torchVersion") or base_probe.get("torchVersion") or "").strip()
     if not torch_version:
         from worker_protocol import emit_error
         return emit_error("RUNTIME_CORE_UPDATE_FAILED", "Unable to determine the installed Torch version; refusing to update the runtime core.", task_id=task_id, recoverable=True)
-    constraints_path: Path | None = None
+    staging_generation: Path | None = None
+    promoted_generation: Path | None = None
+    overlay_committed = False
     try:
-        # Keep the installed Torch build and repair/update the environment in place. If a pip
-        # operation is interrupted, the environment manager exposes an explicit dependency
-        # reinstall action instead of copying the complete multi-gigabyte runtime beforehand.
-        _repair_runtime_venv_config(env_dir)
-        common_requirements = [
-            str(requirement)
-            for name, requirement in manifest.get("common", {}).items()
-            if name not in {"pymss", "pymss-core"}
+        _emit(
+            "runtime_core_update_stage",
+            {
+                "stage": "prepare",
+                "message": "Preparing versioned runtime overlay",
+            },
+            task_id,
+        )
+        _ensure_runtime_pip(python_path, task_id, append_log)
+        base_versions = dict(base_probe.get("packageVersions") or {})
+        requirements = _overlay_requirements(
+            manifest,
+            backend,
+            base_versions,
+            target_pymss_version,
+            target_pymss_core_version,
+        )
+        # Cancellation can terminate this bootstrap process before its finally block runs.
+        # Runtime operations are serialized, so any staging directory left from an earlier
+        # process is safe to reclaim before starting the next generation.
+        for stale_staging in overlay_backend_root.glob(".*.staging"):
+            if stale_staging.is_dir():
+                shutil.rmtree(stale_staging, ignore_errors=True)
+        generation = f"{manifest.get('manifestVersion')}-{time.time_ns()}"
+        staging_generation = overlay_backend_root / f".{generation}.staging"
+        final_generation = overlay_backend_root / generation
+        staging_site_packages = staging_generation / "site-packages"
+        shutil.rmtree(staging_generation, ignore_errors=True)
+        staging_site_packages.mkdir(parents=True)
+        wheel_cache = _runtime_overlay_root() / ".wheel-cache"
+        wheel_cache.mkdir(parents=True, exist_ok=True)
+
+        command = [
+            str(python_path), "-m", "pip", "install",
+            "--upgrade", "--target", str(staging_site_packages), "--no-deps",
+            "--only-binary=:all:", "--prefer-binary", "--cache-dir", str(wheel_cache),
         ]
-        backend_extras = [str(requirement) for requirement in _spec.get("extras", []) or []]
-        # Keep manifest bounds during core-only resolution too. Constraints do not install or
-        # upgrade these packages; they reject incompatible dependencies before pip replaces files.
-        constraints = [f"torch=={torch_version}"]
-        for value in [*manifest.get("common", {}).values(), *backend_extras]:
-            requirement = Requirement(str(value))
-            requirement.extras.clear()  # Pip constraints accept distributions, not extras.
-            constraints.append(str(requirement))
-        constraints_path = env_dir / ".pymss-core-update-constraints.txt"
-        _atomic_write_text(constraints_path, "\n".join(constraints) + "\n")
-        # Exact core pins select the requested versions without --upgrade. This keeps already
-        # satisfied dependencies, including manifest requirements, at their installed versions.
-        command = [str(python_path), "-m", "pip", "install", "--no-cache-dir", "--only-binary=:all:", "--prefer-binary"]
-        command.extend(["--constraint", str(constraints_path)])
         if index_url:
             command.extend(["--index-url", index_url])
-        # Keep extras declared by the shipped manifest (currently ``[proxy]``) when
-        # upgrading an environment created by an older manifest.  Installing only
-        # the bare distribution would leave newly declared optional dependencies
-        # absent even though the core package itself was updated successfully.
-        pymss_requirement = _pin_manifest_requirement(
-            manifest.get("common", {}).get("pymss"),
-            target_pymss_version,
-        )
-        pymss_core_requirement = f"pymss-core=={target_pymss_core_version}"
-        requirements = [pymss_requirement, pymss_core_requirement]
-        if manifest_status == "older" or repair_dependencies:
-            requirements.extend([*common_requirements, *backend_extras])
         command.extend(requirements)
 
         def run_pip(command: list[str], stage: str) -> None:
@@ -2037,7 +2195,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env=os.environ.copy(),
+                env=_probe_environment(),
             )
             assert process.stdout is not None
             try:
@@ -2046,8 +2204,6 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
                     append_log(stage, message)
                     _emit("runtime_core_update_log", {"stage": stage, "message": message}, task_id)
             except Exception:
-                # Do not leave pip running after a broken event pipe.  Otherwise a failed update can
-                # continue changing the environment and make the next click appear to repair it.
                 if process.poll() is None:
                     process.kill()
                 process.wait()
@@ -2059,87 +2215,23 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             if process.wait() != 0:
                 raise RuntimeError(f"pip failed during {stage} with exit code {process.returncode}")
 
-        _emit(
-            "runtime_core_update_stage",
-            {
-                "stage": "prepare",
-                "message": "Preparing dependency reinstall" if repair_dependencies else "Preparing core package update",
-            },
-            task_id,
-        )
-        _ensure_runtime_pip(python_path, task_id, append_log)
-
-        # Releases before the metadata-preserving prune fix may have a working package but no
-        # RECORD file.  Pip refuses to uninstall such a distribution, so repair only these two
-        # small core packages from their currently installed versions before the real upgrade.
-        # ``--ignore-installed --no-deps`` is deliberately limited to this repair command: the
-        # normal update below keeps dependency resolution and the Torch constraint unchanged.
-        missing_records = _runtime_core_missing_records(python_path)
-        if missing_records:
-            repair_requirements = [
-                f"{name}=={missing_records[name]}"
-                for name in ("pymss", "pymss-core")
-                if name in missing_records
-            ]
-            repair_command = [
-                str(python_path), "-m", "pip", "install", "--ignore-installed", "--no-deps",
-                "--no-cache-dir", "--only-binary=:all:", "--prefer-binary",
-            ]
-            if index_url:
-                repair_command.extend(["--index-url", index_url])
-            repair_command.extend(repair_requirements)
-            repair_message = (
-                "Restoring pip installation metadata for "
-                + ", ".join(repair_requirements)
-            )
-            append_log("metadata", repair_message)
-            _emit("runtime_core_update_stage", {"stage": "metadata", "message": repair_message}, task_id)
-            run_pip(repair_command, "metadata")
-            remaining_records = _runtime_core_missing_records(python_path)
-            if remaining_records:
-                raise RuntimeError(
-                    "pip metadata repair did not restore RECORD for: "
-                    + ", ".join(sorted(remaining_records))
-                )
-
-        if repair_dependencies:
-            force_command = [
-                str(python_path), "-m", "pip", "install", "--force-reinstall", "--no-deps",
-                "--no-cache-dir", "--only-binary=:all:", "--prefer-binary",
-            ]
-            force_command.extend(["--constraint", str(constraints_path)])
-            if index_url:
-                force_command.extend(["--index-url", index_url])
-            force_command.extend(requirements)
-            _emit(
-                "runtime_core_update_stage",
-                {
-                    "stage": "repair",
-                    "message": "Reinstalling runtime dependencies without replacing Torch",
-                    "command": "pip install --force-reinstall --no-deps " + " ".join(requirements),
-                },
-                task_id,
-            )
-            run_pip(force_command, "repair")
-
-        stage = "repair-resolve" if repair_dependencies else ("manifest" if manifest_status == "older" else "core")
+        stage = "repair" if repair_dependencies else ("manifest" if manifest_status == "older" else "core")
         _emit(
             "runtime_core_update_stage",
             {
                 "stage": stage,
-                "message": (
-                    "Restoring missing transitive dependencies"
-                    if repair_dependencies
-                    else "Synchronizing runtime dependencies" if stage == "manifest"
-                    else "Updating core packages"
-                ),
-                "command": "pip install " + " ".join(requirements),
+                "message": "Building isolated runtime overlay",
+                "command": "pip install --target <overlay> --no-deps " + " ".join(requirements),
             },
             task_id,
         )
         run_pip(command, stage)
         _emit("runtime_core_update_stage", {"stage": "verify", "message": "Verifying runtime packages"}, task_id)
-        probed = _probe_python_runtime(python_path, _backend_extra_names(manifest, backend))
+        probed = _probe_python_runtime(
+            python_path,
+            _backend_extra_names(manifest, backend),
+            staging_site_packages,
+        )
         manifest_ok, manifest_failures = _manifest_versions_are_satisfied(probed, manifest, backend)
         if not manifest_ok:
             raise RuntimeError(
@@ -2160,11 +2252,15 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             raise RuntimeError(
                 f"Torch version changed to {probed.get('torchVersion') or 'unknown'} during update; expected {torch_version}"
             )
+        staging_generation.rename(final_generation)
+        promoted_generation = final_generation
+        overlay_path = final_generation / "site-packages"
         updated = {
             **(state or {}),
             "backend": backend,
             "manifestVersion": manifest.get("manifestVersion"),
             "pythonPath": str(python_path),
+            "overlayPath": str(overlay_path),
             "logPath": str(log_path),
             "packages": probed.get("packages") or (state.get("packages") if state else None),
             "packageVersions": probed.get("packageVersions") or (state.get("packageVersions") if state else None),
@@ -2173,14 +2269,26 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             "pymssGraphAvailable": bool(probed.get("pymssGraphAvailable")),
             "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        if env_state_path:
+        _emit("runtime_core_update_stage", {"stage": "activate", "message": "Activating runtime overlay"}, task_id)
+        _atomic_write_json(_runtime_overlay_selection_path(backend), {
+            "backend": backend,
+            "manifestVersion": manifest.get("manifestVersion"),
+            "pythonPath": str(python_path),
+            "overlayPath": str(overlay_path),
+        })
+        _write_runtime_state(updated)
+        overlay_committed = True
+        if env_state_path and not _is_bundled_runtime_env(env_dir) and not _is_bundled_bootstrap_python(python_path):
             env_state = dict(updated)
             env_state.pop("pythonPath", None)
             env_state.pop("logPath", None)
             env_state.pop("activatedAt", None)
             env_state.pop("source", None)
-            _atomic_write_json(env_state_path, env_state)
-        _write_runtime_state(updated)
+            try:
+                _atomic_write_json(env_state_path, env_state)
+            except OSError as cache_error:
+                append_log("warning", f"runtime cache state was not updated: {cache_error}")
+        _cleanup_runtime_overlays(backend, {final_generation})
         append_log(
             "complete",
             "Runtime dependency reinstall completed" if repair_dependencies else "Core package update completed",
@@ -2197,6 +2305,8 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         )
         return 0
     except Exception as exc:
+        if not overlay_committed and promoted_generation and promoted_generation.is_dir():
+            shutil.rmtree(promoted_generation, ignore_errors=True)
         from worker_protocol import emit_error
         append_log("error", str(exc))
         return emit_error(
@@ -2208,8 +2318,5 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             extra={"backend": backend, "logPath": str(log_path)},
         )
     finally:
-        if constraints_path:
-            try:
-                constraints_path.unlink()
-            except OSError:
-                pass
+        if staging_generation and staging_generation.is_dir():
+            shutil.rmtree(staging_generation, ignore_errors=True)

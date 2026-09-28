@@ -192,7 +192,7 @@ class MultipleEnvironmentTests(unittest.TestCase):
         # requests for backends that have no managed environment at all.
         probed = probe_result(bootstrap_torch_backend)
         # Worker commands write JSON events to stdout; swallow them so test output stays readable.
-        def probe_runtime(python_path, _extras=None):
+        def probe_runtime(python_path, _extras=None, _overlay_path=None):
             path = str(python_path).lower()
             if "cuda" in path:
                 return probe_result("cuda")
@@ -261,6 +261,29 @@ class MultipleEnvironmentTests(unittest.TestCase):
         # Switching back and forth must not damage either environment.
         with self._runtime():
             self.assertEqual(len(worker_bootstrap._installed_envs(MANIFEST)), 2)
+
+    def test_activation_restores_the_registered_overlay_after_switching_back(self):
+        self._make_env("cpu", "2.7.1")
+        self._make_env("cuda", "2.7.1+cu128")
+        cuda_python = self.envs_dir / "cuda" / "Scripts" / "python.exe"
+        overlay = self.envs_dir / ".overlays" / "cuda" / "generation" / "site-packages"
+        overlay.mkdir(parents=True)
+        selection = self.envs_dir / ".overlays" / "cuda" / "active-overlay.json"
+        selection.write_text(json.dumps({
+            "backend": "cuda",
+            "manifestVersion": "test-1",
+            "pythonPath": str(cuda_python),
+            "overlayPath": str(overlay),
+        }), encoding="utf-8")
+
+        with self._runtime():
+            self.assertEqual(worker_bootstrap.cmd_activate_runtime({"backend": "cuda"}), 0)
+            self.assertEqual(Path(self._active()["overlayPath"]), overlay)
+            self.assertEqual(worker_bootstrap.cmd_activate_runtime({"backend": "cpu"}), 0)
+            self.assertNotIn("overlayPath", self._active())
+            self.assertEqual(worker_bootstrap.cmd_activate_runtime({"backend": "cuda"}), 0)
+
+        self.assertEqual(Path(self._active()["overlayPath"]), overlay)
 
     def test_missing_active_interpreter_is_cleared_before_startup_selection(self):
         self._make_env("cpu", "2.7.1")
@@ -623,7 +646,7 @@ class BundledRuntimeFallbackTests(unittest.TestCase):
         self.assertEqual([item["backend"] for item in items], ["cpu"])
         self.assertEqual(items[0]["source"], "bundled")
 
-    def test_activating_bundled_mlx_clears_user_pointer(self):
+    def test_activating_bundled_mlx_records_a_user_pointer_for_overlay_support(self):
         cpu_python = self.user_envs / "cpu" / "bin" / "python"
         cpu_python.parent.mkdir(parents=True)
         cpu_python.write_text("stub", encoding="utf-8")
@@ -643,7 +666,10 @@ class BundledRuntimeFallbackTests(unittest.TestCase):
                 "pythonPath": str(self.bootstrap_python),
             })
         self.assertEqual(result, 0)
-        self.assertFalse((self.user_envs / "active-runtime.json").exists())
+        active = json.loads((self.user_envs / "active-runtime.json").read_text(encoding="utf-8"))
+        self.assertEqual(active["backend"], "mlx")
+        self.assertEqual(active["source"], "bundled")
+        self.assertEqual(Path(active["pythonPath"]), self.bootstrap_python)
 
     def test_startup_bundled_activation_preserves_a_pointer_created_after_probe(self):
         cpu_python = self.user_envs / "cpu" / "bin" / "python"

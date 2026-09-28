@@ -123,6 +123,7 @@ struct ActiveRuntimeRecord {
     python_path: String,
     backend: Option<String>,
     source: Option<String>,
+    overlay_path: Option<String>,
     #[serde(default)]
     debug_override: bool,
 }
@@ -307,6 +308,53 @@ fn active_runtime_python_path(app: &AppHandle) -> AppResult<Option<String>> {
         }
     }
     Ok(None)
+}
+
+fn resolve_runtime_overlay_for_record(
+    file: &Path,
+    active_python: &str,
+    allowed_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(file).ok()?;
+    let record: ActiveRuntimeRecord = serde_json::from_str(&content).ok()?;
+    let (record_python, _) = resolve_active_runtime_record(&file.to_path_buf())?;
+    let expected = PathBuf::from(active_python).canonicalize().ok()?;
+    let recorded = PathBuf::from(record_python).canonicalize().ok()?;
+    if expected != recorded {
+        return None;
+    }
+    let raw_overlay = record.overlay_path?.trim().to_string();
+    if raw_overlay.is_empty() {
+        return None;
+    }
+    let overlay = PathBuf::from(raw_overlay);
+    let overlay = if overlay.is_absolute() {
+        overlay
+    } else {
+        file.parent()?.join(overlay)
+    };
+    let overlay = overlay.canonicalize().ok()?;
+    if !overlay.is_dir() {
+        return None;
+    }
+    allowed_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| overlay.starts_with(root.join(".overlays")))
+        .then_some(overlay)
+}
+
+fn active_runtime_overlay_path(app: &AppHandle, active_python: &str) -> AppResult<Option<PathBuf>> {
+    let user_runtime = storage::runtime_envs_dir(app)?;
+    let mut records = vec![storage::active_runtime_file(app)?];
+    let mut allowed_roots = vec![user_runtime];
+    if let Some(bundled) = bundled_runtime_envs_dir(app)? {
+        records.push(bundled.join("active-runtime.json"));
+        allowed_roots.push(bundled);
+    }
+    Ok(records
+        .into_iter()
+        .find_map(|file| resolve_runtime_overlay_for_record(&file, active_python, &allowed_roots)))
 }
 
 fn is_bundled_runtime_python_path(file: &Path, python_path: &str) -> AppResult<bool> {
@@ -546,6 +594,11 @@ fn build_worker_command(
     } else {
         active_runtime_python_path(app)?
     };
+    let active_overlay = active_runtime_python
+        .as_deref()
+        .map(|python| active_runtime_overlay_path(app, python))
+        .transpose()?
+        .flatten();
     let python = select_worker_python(command, &bootstrap_python, active_runtime_python)?;
     let python_for_log = python.clone();
     let worker_for_log = worker.clone();
@@ -563,6 +616,9 @@ fn build_worker_command(
             "PYMSS_STUDIO_DEFAULT_OUTPUT_DIR",
             default_output_dir(app)?.to_string_lossy().to_string(),
         );
+    if let Some(overlay) = active_overlay {
+        cmd.env("PYTHONPATH", overlay.to_string_lossy().to_string());
+    }
     if let Some(path) = session_log::log_env_path(app) {
         cmd.env("PYMSS_STUDIO_SESSION_LOG", path)
             .env("PYMSS_STUDIO_DEBUG_LOG", "1");
@@ -1638,6 +1694,65 @@ mod tests {
             assert_eq!(super::resolve_active_runtime_record(&pointer), None);
             assert_eq!(fs::read(&pointer).unwrap(), bytes);
         }
+    }
+
+    #[test]
+    fn runtime_overlay_must_match_the_active_python_and_runtime_root() {
+        let fixture = ResourceFixture::new("runtime-overlay");
+        let runtime_root = fixture.0.join("runtime-envs");
+        let python = runtime_root.join("cpu/bin/python");
+        let overlay = runtime_root.join(".overlays/cpu/generation/site-packages");
+        let outside = fixture.0.join("outside/site-packages");
+        fixture.file(&python);
+        fs::create_dir_all(&overlay).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let pointer = runtime_root.join("active-runtime.json");
+
+        fs::write(
+            &pointer,
+            serde_json::to_vec(&json!({
+                "pythonPath": python,
+                "backend": "cpu",
+                "overlayPath": overlay,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::resolve_runtime_overlay_for_record(
+                &pointer,
+                &python.to_string_lossy(),
+                std::slice::from_ref(&runtime_root),
+            ),
+            Some(overlay.canonicalize().unwrap()),
+        );
+
+        fs::write(
+            &pointer,
+            serde_json::to_vec(&json!({
+                "pythonPath": python,
+                "backend": "cpu",
+                "overlayPath": outside,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::resolve_runtime_overlay_for_record(
+                &pointer,
+                &python.to_string_lossy(),
+                std::slice::from_ref(&runtime_root),
+            ),
+            None,
+        );
+        assert_eq!(
+            super::resolve_runtime_overlay_for_record(
+                &pointer,
+                &fixture.0.join("other-python").to_string_lossy(),
+                &[runtime_root],
+            ),
+            None,
+        );
     }
 
     #[cfg(windows)]

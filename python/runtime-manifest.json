@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
-  "manifestVersion": "2026.09.2",
+  "baseGeneration": 1,
+  "manifestVersion": "2026.09.3",
   "python": "3.12",
   "bootstrap": {
     "requests": "requests[socks]>=2.32,<3"
@@ -15,11 +16,12 @@
     "networkx": "networkx>=3.0,<4",
     "sympy": "sympy>=1.12,<2",
     "typing-extensions": "typing-extensions>=4.8,<5",
+    "pysocks": "PySocks>=1.7.1,<2",
     "requests": "requests>=2.32,<3",
     "pyyaml": "pyyaml>=6.0.1,<7",
     "tqdm": "tqdm>=4.60,<5",
-    "pymss": "pymss[proxy]>=2.1.7",
-    "pymss-core": "pymss-core>=0.1.6"
+    "pymss": "pymss[proxy]==2.1.7",
+    "pymss-core": "pymss-core==0.1.10"
   },
   "backends": {
     "cpu": {

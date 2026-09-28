@@ -8,7 +8,7 @@ import { connectWorkerEvents } from './utils/events'
 import { useSettingsStore } from '@/stores/settings'
 import { useAppStore, type RuntimeBackend } from '@/stores/app'
 import { useUpdateStore } from '@/stores/update'
-import { runtimeToActivate } from '@/utils/runtime'
+import { activeRuntimeEnvironment, runtimeCoreSyncAvailable, runtimeToActivate } from '@/utils/runtime'
 import './styles/global.scss'
 
 async function bootstrap() {
@@ -83,7 +83,8 @@ async function bootstrap() {
         runtime = appState.runtimeInfo || runtime
       }
     }
-    if (runtime.ready) {
+    const activeRuntime = activeRuntimeEnvironment(runtime)
+    if (runtime.ready && !runtimeCoreSyncAvailable(activeRuntime, runtime.manifestVersion)) {
       void models.loadModels().catch((error) => {
         console.warn('Failed to preload model metadata', error)
       })

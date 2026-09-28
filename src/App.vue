@@ -15,7 +15,7 @@ import { useI18n } from 'vue-i18n'
 import { listen, type EventCallback, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-shell'
 import { useWorkflowStore } from '@/stores/workflow'
-import { activeRuntimeEnvironment, runtimeBackendLabel, runtimeCoreSyncAvailable, runtimeCoreUpdateAvailable as hasRuntimeCoreUpdate } from '@/utils/runtime'
+import { activeRuntimeEnvironment, isKnownRuntimeBackend, runtimeBackendLabel, runtimeCoreSyncAvailable, runtimeCoreUpdateAvailable as hasRuntimeCoreUpdate } from '@/utils/runtime'
 import { connectWorkerEvents } from '@/utils/events'
 
 const settings = useSettingsStore()
@@ -24,7 +24,7 @@ const updates = useUpdateStore()
 const workflow = useWorkflowStore()
 const route = useRoute()
 const router = useRouter()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const bootReady = ref(false)
 const backgroundWarmupsStarted = ref(false)
 const deferredPromptShown = ref(false)
@@ -36,6 +36,8 @@ const manualUpdateModalVisible = ref(false)
 const manualUpdateError = ref('')
 const runtimeCorePromptVisible = ref(false)
 const runtimeCorePromptShown = ref(false)
+const runtimeAutoSyncActive = ref(false)
+const runtimeAutoSyncAttempted = ref(false)
 const workflowEventUnlisteners: UnlistenFn[] = []
 let unmounted = false
 
@@ -176,9 +178,37 @@ async function openManualUpdate() {
 }
 
 function showRuntimeCorePrompt() {
-  if (runtimeCorePromptShown.value || !bootReady.value || isStandaloneRoute.value || !runtimeCoreUpdateAvailable.value) return
+  if (runtimeAutoSyncActive.value || runtimeCorePromptShown.value || !bootReady.value || isStandaloneRoute.value || !runtimeCoreUpdateAvailable.value) return
+  if (runtimeManifestSyncRequired.value && !runtimeAutoSyncAttempted.value) return
   runtimeCorePromptShown.value = true
   runtimeCorePromptVisible.value = true
+}
+
+async function synchronizeRuntimeManifest() {
+  if (
+    runtimeAutoSyncAttempted.value
+    || runtimeAutoSyncActive.value
+    || !bootReady.value
+    || showStartupOnboarding.value
+    || isStandaloneRoute.value
+    || !runtimeManifestSyncRequired.value
+  ) return
+  const runtime = activeRuntime.value
+  const backend = String(runtime?.backend || '')
+  if (!runtime?.pythonPath || !isKnownRuntimeBackend(backend)) return
+
+  runtimeAutoSyncAttempted.value = true
+  runtimeAutoSyncActive.value = true
+  runtimeCorePromptVisible.value = false
+  try {
+    await app.updateRuntimeCore(backend, 'auto', locale.value, {
+      pythonPath: runtime.pythonPath,
+    })
+  } catch {
+    runtimeAutoSyncActive.value = false
+    runtimeCorePromptShown.value = false
+    showRuntimeCorePrompt()
+  }
 }
 
 function openRuntimeSettings() {
@@ -277,6 +307,19 @@ watch([bootReady, isStandaloneRoute, runtimeCoreUpdateAvailable], () => {
   }
   showRuntimeCorePrompt()
 }, { immediate: true })
+
+watch([bootReady, showStartupOnboarding, isStandaloneRoute, runtimeManifestSyncRequired], () => {
+  void synchronizeRuntimeManifest()
+}, { immediate: true })
+
+watch(() => app.runtimeCoreUpdateStatus, (status) => {
+  if (!runtimeAutoSyncActive.value || status === 'updating' || status === 'idle') return
+  runtimeAutoSyncActive.value = false
+  if (status !== 'success') {
+    runtimeCorePromptShown.value = false
+    showRuntimeCorePrompt()
+  }
+})
 
 const themeOverrides = computed(() => {
   void isDark.value
@@ -380,6 +423,15 @@ const themeOverrides = computed(() => {
               {{ t('settings.runtimeCoreStartupOpenSettings') }}
             </n-button>
           </template>
+        </n-modal>
+        <n-modal :show="runtimeAutoSyncActive" preset="card" :mask-closable="false" :closable="false" class="runtime-auto-sync-modal">
+          <div class="runtime-auto-sync-panel">
+            <n-spin size="small" />
+            <div>
+              <strong>{{ t('settings.runtimeAutoSyncTitle') }}</strong>
+              <span>{{ app.runtimeCoreUpdateMessage || t('settings.runtimeAutoSyncPreparing') }}</span>
+            </div>
+          </div>
         </n-modal>
         <n-modal
           :show="updates.isInstallOverlayVisible"
@@ -512,6 +564,34 @@ const themeOverrides = computed(() => {
   width: clamp(320px, 44vw, 520px);
   max-width: calc(100vw - 24px);
   box-sizing: border-box;
+}
+
+:global(.runtime-auto-sync-modal) {
+  width: min(460px, calc(100vw - 24px));
+}
+
+.runtime-auto-sync-panel {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.runtime-auto-sync-panel > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.runtime-auto-sync-panel strong {
+  color: var(--on-surface);
+  font-size: 15px;
+}
+
+.runtime-auto-sync-panel span {
+  color: var(--on-surface-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .update-install-panel {
