@@ -58,5 +58,6 @@ jobs:
             intel-build/macos-binary-audit.json
             intel-build/audio-tools-audit.json
             intel-build/bundled-models.jsonl
+            intel-build/vr-regression/report.json
           if-no-files-found: ignore
           retention-days: 14

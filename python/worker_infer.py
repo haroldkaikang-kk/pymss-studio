@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import platform
 import re
+import sys
 import traceback
 from collections import deque
 from datetime import datetime
@@ -413,6 +415,10 @@ def _normalize_device_ids(value: Any) -> list[int]:
 def _resolve_separator_device(device: Any, device_ids: Any) -> tuple[str, list[int], str]:
     requested_device = str(device or "auto").strip().lower() or "auto"
     normalized_ids = _normalize_device_ids(device_ids)
+    # Intel AMD GPUs can report MPS support, but this CPU distribution has no MLX.
+    if sys.platform == "darwin" and platform.machine().lower() in {"x86_64", "amd64"}:
+        if requested_device in {"auto", "mps", "mlx"}:
+            return "cpu", [0], f"cpu (Intel compatibility; requested {requested_device})"
     if requested_device != "cuda":
         return requested_device, normalized_ids, requested_device
 

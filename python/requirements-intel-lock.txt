@@ -97,5 +97,5 @@ typing-extensions==4.16.0
     #   torch
 urllib3==2.8.0
     # via requests
-pymss==2.1.7+intel1
+pymss==2.1.7+intel2
 pymss-core==0.1.10+intel1

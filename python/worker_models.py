@@ -944,6 +944,10 @@ def cmd_env_info() -> int:
         payload["cudaDevices"] = cuda_devices
         mps = getattr(torch.backends, "mps", None)
         payload["mpsAvailable"] = bool(mps and mps.is_available())
+        if sys.platform == "darwin" and platform.machine().lower() in {"x86_64", "amd64"}:
+            # Expose only devices supported by this CPU-only Intel distribution.
+            payload["mpsAvailable"] = False
+            payload["mlxAvailable"] = False
     except Exception as exc:
         payload["torchError"] = str(exc)
 

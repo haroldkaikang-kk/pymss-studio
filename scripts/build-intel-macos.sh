@@ -30,6 +30,7 @@ export PYMSS_STUDIO_ACTIVE_RUNTIME_FILE="$PYMSS_STUDIO_RUNTIME_ENVS_DIR/active-r
 export PYMSS_STUDIO_BUNDLED_RUNTIME_ENVS_DIR="$resources/python-runtime/runtime-envs"
 PYTHONHOME="$resources/python-runtime" "$resources/python-runtime/bin/python3" "$resources/python/worker.py" env_info
 PYTHONHOME="$resources/python-runtime" "$resources/python-runtime/bin/python3" "$resources/python/worker.py" list_models > intel-build/bundled-models.jsonl
+PATH="$resources/bin:$PATH" PYTHONHOME="$resources/python-runtime" "$resources/python-runtime/bin/python3" scripts/test-intel-vr-inference.py --root intel-build/vr-regression
 # Seal resources only after Python smoke checks, so generated files cannot
 # invalidate the signature on the final archive.
 SIGN_IDENTITY=- bash scripts/resign-macos-app.sh "$app_path"

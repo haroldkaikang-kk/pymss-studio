@@ -19,7 +19,7 @@ class IntelRuntimeTests(unittest.TestCase):
             self.assertEqual(manifest["backends"]["cpu"]["torch"]["requirement"], "torch==2.2.2")
             self.assertIn("--find-links", runtime._intel_pip_args())
             with mock.patch.object(runtime, "_latest_pypi_version", side_effect=AssertionError("must not upgrade Intel core from PyPI")):
-                self.assertEqual(runtime._core_target_version("pymss"), "2.1.7+intel1")
+                self.assertEqual(runtime._core_target_version("pymss"), "2.1.7+intel2")
                 self.assertEqual(runtime._core_target_version("pymss-core"), "0.1.10+intel1")
 
     def test_other_platforms_keep_original_manifest_and_updates(self):

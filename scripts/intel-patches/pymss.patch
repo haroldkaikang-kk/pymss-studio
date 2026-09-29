@@ -1,5 +1,24 @@
+diff --git a/pymss/separator.py b/pymss/separator.py
+index a5bb01f..33a5580 100644
+--- a/pymss/separator.py
++++ b/pymss/separator.py
+@@ -90,6 +90,14 @@ def _resolve_public_device(device, inference_params, logger):
+         Any: Resolved value."""
+     inference_params = dict(inference_params or {})
+     requested_device = device
++    # AMD MPS on Intel does not imply Apple Silicon MLX support. Apply at
++    # the engine boundary as well so imported workflows follow the same rule.
++    if platform.system() == "Darwin" and platform.machine().lower() in {"x86_64", "amd64"}:
++        if requested_device in {"auto", "mps", "mlx"}:
++            logger.info("Intel macOS compatibility: using CPU (requested %s)", requested_device)
++            requested_device = "cpu"
++        if requested_device == "cpu":
++            inference_params = {k: v for k, v in inference_params.items() if not k.startswith("mps_")}
+     if requested_device == "mlx":
+         if not torch.backends.mps.is_available():
+             raise RuntimeError("device='mlx' requires Apple Silicon MPS support")
 diff --git a/pyproject.toml b/pyproject.toml
-index 22b2e84..2e162f4 100644
+index 22b2e84..4543152 100644
 --- a/pyproject.toml
 +++ b/pyproject.toml
 @@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
@@ -7,7 +26,7 @@ index 22b2e84..2e162f4 100644
  [project]
  name = "pymss"
 -version = "2.1.7"
-+version = "2.1.7+intel1"
++version = "2.1.7+intel2"
  description = "Python package for music source separation."
  readme = { file = "README.md", content-type = "text/markdown" }
  requires-python = ">=3.10"

@@ -2,12 +2,17 @@
   "productName": "Pymss Studio Intel",
   "identifier": "studio.pymss.desktop.intel",
   "bundle": {
-    "targets": ["app"],
-    "macOS": {"minimumSystemVersion": "12.0"},
+    "targets": [
+      "app"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    },
     "resources": {
       "../python/": "python/",
       "../intel-build/python-runtime/": "python-runtime/",
       "../intel-build/bin/": "bin/"
     }
-  }
+  },
+  "version": "0.0.13"
 }
