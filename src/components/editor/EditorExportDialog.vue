@@ -44,14 +44,14 @@ const exportFormatOptions = computed(() => [
 ])
 
 const wavBitDepthOptions = computed(() => [
-  { label: 'PCM_16', value: 'PCM_16' },
-  { label: 'PCM_24', value: 'PCM_24' },
-  { label: 'FLOAT', value: 'FLOAT' },
+  { label: t('audio.pcm16'), value: 'PCM_16' },
+  { label: t('audio.pcm24'), value: 'PCM_24' },
+  { label: t('audio.float'), value: 'FLOAT' },
 ])
 
 const flacBitDepthOptions = computed(() => [
-  { label: 'PCM_16', value: 'PCM_16' },
-  { label: 'PCM_24', value: 'PCM_24' },
+  { label: t('audio.pcm16'), value: 'PCM_16' },
+  { label: t('audio.pcm24'), value: 'PCM_24' },
 ])
 
 const sampleRateOptions = computed(() => [

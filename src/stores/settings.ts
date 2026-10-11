@@ -96,6 +96,7 @@ type StoredSettings = {
   downloadMethod?: DownloadMethod
   maxConcurrentSeparations?: number
   clearInputAfterSubmit?: boolean
+  outputSampleRate?: number
   wavBitDepth?: string
   flacBitDepth?: string
   mp3BitRate?: string
@@ -120,6 +121,7 @@ const DEFAULT_DOWNLOAD_METHOD: DownloadMethod = 'aria2c'
 const DEFAULT_DEFAULT_DEVICE = 'auto'
 const DEFAULT_DEFAULT_FORMAT = 'wav'
 const DEFAULT_CLEAR_INPUT_AFTER_SUBMIT = true
+const DEFAULT_OUTPUT_SAMPLE_RATE = 48000
 const DEFAULT_PROXY_MODE: ProxyMode = 'system'
 const DEFAULT_PROXY_URL = ''
 const DEFAULT_UPDATE_CHANNEL: UpdateChannel = 'stable'
@@ -192,6 +194,7 @@ function browserAppPaths(): AppPathsPayload {
 }
 
 export type AudioParams = {
+  outputSampleRate: number
   wavBitDepth: string
   flacBitDepth: string
   mp3BitRate: string
@@ -234,6 +237,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const downloadMethod = ref<DownloadMethod>(DEFAULT_DOWNLOAD_METHOD)
   const maxConcurrentSeparations = ref(DEFAULT_CONCURRENT_SEPARATIONS)
   const clearInputAfterSubmit = ref(DEFAULT_CLEAR_INPUT_AFTER_SUBMIT)
+  const outputSampleRate = ref(DEFAULT_OUTPUT_SAMPLE_RATE)
   const wavBitDepth = ref(DEFAULT_WAV_BIT_DEPTH)
   const flacBitDepth = ref(DEFAULT_FLAC_BIT_DEPTH)
   const mp3BitRate = ref(DEFAULT_MP3_BIT_RATE)
@@ -270,6 +274,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadMethod: downloadMethod.value,
     maxConcurrentSeparations: maxConcurrentSeparations.value,
     clearInputAfterSubmit: clearInputAfterSubmit.value,
+    outputSampleRate: outputSampleRate.value,
     wavBitDepth: wavBitDepth.value,
     flacBitDepth: flacBitDepth.value,
     mp3BitRate: mp3BitRate.value,
@@ -327,6 +332,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadMethod.value = normalizeDownloadMethod(stored?.downloadMethod)
     maxConcurrentSeparations.value = normalizeConcurrentSeparations(stored?.maxConcurrentSeparations)
     clearInputAfterSubmit.value = stored?.clearInputAfterSubmit ?? DEFAULT_CLEAR_INPUT_AFTER_SUBMIT
+    outputSampleRate.value = stored?.outputSampleRate === 44100 ? 44100 : DEFAULT_OUTPUT_SAMPLE_RATE
     wavBitDepth.value = stored?.wavBitDepth || DEFAULT_WAV_BIT_DEPTH
     flacBitDepth.value = stored?.flacBitDepth || DEFAULT_FLAC_BIT_DEPTH
     mp3BitRate.value = stored?.mp3BitRate || DEFAULT_MP3_BIT_RATE
@@ -393,6 +399,7 @@ export const useSettingsStore = defineStore('settings', () => {
       downloadMethod,
       maxConcurrentSeparations,
       clearInputAfterSubmit,
+      outputSampleRate,
       wavBitDepth,
       flacBitDepth,
       mp3BitRate,
@@ -481,6 +488,7 @@ export const useSettingsStore = defineStore('settings', () => {
 
   function getAudioParams(): Record<string, string | number> {
     return {
+      output_sample_rate: outputSampleRate.value,
       wav_bit_depth: wavBitDepth.value,
       flac_bit_depth: flacBitDepth.value,
       mp3_bit_rate: mp3BitRate.value,
@@ -865,6 +873,7 @@ export const useSettingsStore = defineStore('settings', () => {
     downloadMethod,
     maxConcurrentSeparations,
     clearInputAfterSubmit,
+    outputSampleRate,
     MAX_CONCURRENT_SEPARATIONS,
     SCALE_FACTOR_MIN,
     SCALE_FACTOR_MAX,

@@ -99,6 +99,7 @@ const showNamingModal = ref(false)
 const showLogModal = ref(false)
 const modelSearch = ref('')
 const modelCategoryFilter = ref('')
+const modelPurposeFilter = ref<'all' | 'multistem' | 'traditional'>('all')
 const modelPage = ref(1)
 const workflowSearch = ref('')
 const contextMenuX = ref(0)
@@ -162,6 +163,10 @@ const wavBitDepthOptions = computed(() => [
   { label: t('audio.pcm24'), value: 'PCM_24' },
   { label: t('audio.float'), value: 'FLOAT' },
 ])
+const outputSampleRateOptions = computed(() => [
+  { label: '44,100 Hz', value: 44100 },
+  { label: '48,000 Hz', value: 48000 },
+])
 const flacBitDepthOptions = computed(() => [
   { label: t('audio.pcm16'), value: 'PCM_16' },
   { label: t('audio.pcm24'), value: 'PCM_24' },
@@ -192,6 +197,36 @@ const modelSortOptions = computed(() => [
   { label: t('separate.modelSortNameAsc'), value: 'name-asc' },
   { label: t('separate.modelSortNameDesc'), value: 'name-desc' },
 ] as Array<{ label: string; value: ModelListSortMode }>)
+const modelPurposeOptions = computed(() => [
+  { label: t('separate.modelPurposeAll'), value: 'all' },
+  { label: t('separate.modelPurposeMultistem'), value: 'multistem' },
+  { label: t('separate.modelPurposeTraditional'), value: 'traditional' },
+])
+
+function modelStemNames(item: ModelEntry) {
+  const configured = String(item.configInstruments || '').split(/[,/|]/)
+  const catalog = String(item.targetStem || '').split(/[,/|]/)
+  return [...new Set([...configured, ...catalog].map(value => value.trim().toLowerCase()).filter(Boolean))]
+}
+
+function matchesModelPurpose(item: ModelEntry) {
+  if (modelPurposeFilter.value === 'all') return true
+  const stems = modelStemNames(item)
+  if (modelPurposeFilter.value === 'multistem') {
+    return stems.length >= 4 || item.secondaryCategory === 'six_stem' || item.secondaryCategory === 'mega_53_stems'
+  }
+  const descriptor = [item.name, item.targetStem, item.primaryCategory, item.secondaryCategory]
+    .join(' ')
+    .toLowerCase()
+  return item.secondaryCategory === 'mega_53_stems'
+    || /(woodwind|wind|flute|strings|bowed|violin|viola|cello|harp|sitar|mandolin|percussion|bells|timpani)/.test(descriptor)
+}
+
+function openPurposeModels() {
+  model.search = ''
+  model.category = modelPurposeFilter.value === 'traditional' ? 'mega_53_stems' : 'six_stem'
+  router.push('/models')
+}
 const saveAsFolder = computed({
   get: () => outputLayout.value === 'folders',
   set: (value: boolean) => {
@@ -645,7 +680,7 @@ const filteredDownloadedModels = computed(() => {
       || item.category.toLowerCase() === selectedCategory
       || item.primaryCategory.toLowerCase() === selectedCategory
       || item.secondaryCategory.toLowerCase() === selectedCategory
-    return matchesQuery && matchesCategory
+    return matchesQuery && matchesCategory && matchesModelPurpose(item)
   })
 })
 const pagedDownloadedModels = computed(() => {
@@ -1463,7 +1498,7 @@ watch(ensembleStemOptionsByModel, () => {
   if (changed) ensembleModelStems.value = nextStems
 }, { deep: true, immediate: true })
 
-watch([modelSearch, modelCategoryFilter, modelPageSize], () => {
+watch([modelSearch, modelCategoryFilter, modelPurposeFilter, modelPageSize], () => {
   modelPage.value = 1
 })
 
@@ -2338,6 +2373,12 @@ async function retryCurrentTask() {
                       <template #prefix><n-icon :component="SearchOutline" /></template>
                     </n-input>
                     <n-select
+                      v-model:value="modelPurposeFilter"
+                      class="target-toolbar__purpose"
+                      :options="modelPurposeOptions"
+                      :aria-label="t('separate.modelPurposeLabel')"
+                    />
+                    <n-select
                       class="target-toolbar__filter"
                       v-model:value="modelCategoryFilter"
                       :menu-props="{ class: 'model-picker__category-menu' }"
@@ -2371,6 +2412,13 @@ async function retryCurrentTask() {
                         <n-icon :component="GridOutline" />
                       </button>
                     </div>
+                  </div>
+                  <div v-if="modelPurposeFilter !== 'all'" class="purpose-summary-bar">
+                    <div>
+                      <strong>{{ modelPurposeFilter === 'traditional' ? t('separate.modelPurposeTraditional') : t('separate.modelPurposeMultistem') }}</strong>
+                      <span>{{ modelPurposeFilter === 'traditional' ? t('separate.modelPurposeTraditionalHint') : t('separate.modelPurposeMultistemHint') }}</span>
+                    </div>
+                    <n-button size="small" secondary @click="openPurposeModels">{{ t('separate.findPurposeModels') }}</n-button>
                   </div>
                   <div v-if="ensembleEnabled" class="ensemble-summary-bar">
                     <div class="ensemble-summary-bar__info">
@@ -2421,6 +2469,7 @@ async function retryCurrentTask() {
                   <div v-else class="stage-empty">
                     <div class="stage-empty__glyph"><n-icon :component="SearchOutline" /></div>
                     <strong>{{ t('separate.modelSearchEmpty') }}</strong>
+                    <n-button v-if="modelPurposeFilter !== 'all'" secondary @click="openPurposeModels">{{ t('separate.findPurposeModels') }}</n-button>
                   </div>
                   <div v-if="filteredDownloadedModels.length" class="model-pagination">
                     <span>{{ t('separate.modelPageSummary', { total: filteredDownloadedModels.length }) }}</span>
@@ -2698,6 +2747,12 @@ async function retryCurrentTask() {
               <span>{{ t('separate.audioQualityEditable') }}</span>
             </div>
             <n-grid :cols="2" :x-gap="16" :y-gap="16" responsive="screen">
+              <n-grid-item>
+                <div class="field-block">
+                  <label>{{ t('audio.outputSampleRate') }}</label>
+                  <n-select v-model:value="settings.outputSampleRate" :options="outputSampleRateOptions" />
+                </div>
+              </n-grid-item>
               <n-grid-item v-if="effectiveFormat === 'wav'">
                 <div class="field-block">
                   <label>{{ t('audio.wavBitDepth') }}</label>
@@ -3894,12 +3949,13 @@ async function retryCurrentTask() {
 .target-toolbar {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 170px 170px auto;
+  grid-template-columns: minmax(0, 1fr) 160px 150px 150px auto;
   align-items: center;
   gap: 10px;
 }
 .target-toolbar--single { grid-template-columns: minmax(0, 1fr); }
 .target-toolbar__filter,
+.target-toolbar__purpose,
 .target-toolbar__sort { min-width: 0; }
 .target-toolbar__view { justify-self: end; }
 
@@ -3913,6 +3969,19 @@ async function retryCurrentTask() {
   border-radius: 7px;
   background: var(--surface-2);
 }
+.purpose-summary-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--outline));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--primary-soft) 18%, var(--surface-2));
+}
+.purpose-summary-bar > div { display: grid; gap: 3px; min-width: 0; }
+.purpose-summary-bar strong { font-size: 12px; }
+.purpose-summary-bar span { color: var(--on-surface-muted); font-size: 11px; line-height: 1.45; }
 .ensemble-summary-bar__info { display: grid; gap: 2px; min-width: 0; }
 .ensemble-summary-bar__info strong { font-size: 12px; }
 .ensemble-summary-bar__info span,

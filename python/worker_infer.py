@@ -176,6 +176,7 @@ def _studio_separator_type() -> type[Any]:
             self._studio_active_output_count = 0
             self._studio_expected_output_count = self._calculate_expected_output_count()
             self._studio_output_sources: dict[Path, str] = {}
+            self._studio_output_sample_rate = int(getattr(self, "audio_params", {}).get("output_sample_rate") or 0)
             stems = self._stems_to_save() or list(self.config.training.instruments)
             ordered_stems = [stem for _, stem in sorted(
                 enumerate(stems),
@@ -185,6 +186,21 @@ def _studio_separator_type() -> type[Any]:
                 str(stem).strip().lower(): index
                 for index, stem in enumerate(ordered_stems)
             }
+
+        def save_audio(self, audio: Any, sr: int, file_name: str, store_dir: str) -> None:
+            """Save at the user-selected delivery rate without changing model inference rate."""
+            target_sr = int(getattr(self, "_studio_output_sample_rate", 0) or sr)
+            if target_sr != int(sr):
+                import numpy as np
+                from pymss.audio_io import resample_audio  # type: ignore
+
+                samples = np.asarray(audio)
+                if samples.ndim == 2:
+                    samples = resample_audio(samples.T, int(sr), target_sr).T
+                else:
+                    samples = resample_audio(samples, int(sr), target_sr)
+                audio = np.ascontiguousarray(samples)
+            super().save_audio(audio, target_sr, file_name, store_dir)
 
         def _calculate_expected_output_count(self) -> int:
             try:
@@ -703,6 +719,7 @@ def _enrich_inference_params_for_model(
 
 def normalize_audio_params(payload_audio_params: Any) -> dict[str, Any]:
     defaults = {
+        "output_sample_rate": 48000,
         "wav_bit_depth": "FLOAT",
         "flac_bit_depth": "PCM_24",
         "mp3_bit_rate": "320k",
@@ -717,6 +734,10 @@ def normalize_audio_params(payload_audio_params: Any) -> dict[str, Any]:
         **payload_audio_params,
     }
     normalized["m4a_codec"] = "aac"
+    try:
+        normalized["output_sample_rate"] = 44100 if int(normalized["output_sample_rate"]) == 44100 else 48000
+    except (TypeError, ValueError):
+        normalized["output_sample_rate"] = 48000
     return normalized
 
 

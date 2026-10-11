@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { createEditorAudioElement } from '../src/utils/editorAudio.ts'
+import { createEditorAudioElement, waitForEditorAudioReady } from '../src/utils/editorAudio.ts'
 
 describe('editor audio element setup', () => {
   it('sets CORS before assigning the asset URL', () => {
@@ -56,5 +56,28 @@ describe('editor audio element setup', () => {
         value: originalAudio,
       })
     }
+  })
+})
+
+describe('editor audio readiness', () => {
+  it('resolves immediately when future audio data is available', async () => {
+    const audio = { readyState: 3 } as HTMLAudioElement
+    await waitForEditorAudioReady(audio, 1)
+  })
+
+  it('waits for canplay instead of treating metadata as playable audio', async () => {
+    const listeners = new Map<string, () => void>()
+    const audio = {
+      readyState: 1,
+      addEventListener(name: string, listener: () => void) { listeners.set(name, listener) },
+      removeEventListener(name: string) { listeners.delete(name) },
+    } as unknown as HTMLAudioElement
+    let resolved = false
+    const ready = waitForEditorAudioReady(audio, 1000).then(() => { resolved = true })
+    await Promise.resolve()
+    assert.equal(resolved, false)
+    listeners.get('canplay')?.()
+    await ready
+    assert.equal(resolved, true)
   })
 })

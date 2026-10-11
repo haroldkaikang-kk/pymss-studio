@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier, Lock
@@ -22,9 +23,11 @@ from worker_infer import (
 
 
 class _OutputSeparatorBase:
-    def __init__(self, instruments: list[str]) -> None:
+    def __init__(self, instruments: list[str], audio_params=None) -> None:
         self.config = SimpleNamespace(training=SimpleNamespace(instruments=instruments))
         self.logger = mock.Mock()
+        self.audio_params = audio_params or {}
+        self.saved_audio = None
 
     def _stems_to_save(self):
         return self.config.training.instruments
@@ -34,6 +37,9 @@ class _OutputSeparatorBase:
 
     def process_folder(self, input_folder):
         raise AssertionError("The upstream separation boundary must be stubbed")
+
+    def save_audio(self, audio, sr, file_name, store_dir):
+        self.saved_audio = (audio, sr, file_name, store_dir)
 
 
 class StudioOutputNamingTests(unittest.TestCase):
@@ -65,6 +71,31 @@ class StudioOutputNamingTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), b"vocals")
             self.assertEqual(stale.read_bytes(), b"stale")
             self.assertEqual(unrelated.read_bytes(), b"keep")
+
+    def test_delivery_sample_rate_resamples_stereo_without_changing_channel_layout(self) -> None:
+        calls = []
+
+        def resample_audio(audio, source_rate, target_rate):
+            calls.append((audio.shape, source_rate, target_rate))
+            return audio
+
+        with mock.patch.dict(sys.modules, {
+            "pymss": SimpleNamespace(MSSeparator=_OutputSeparatorBase),
+            "pymss.audio_io": SimpleNamespace(resample_audio=resample_audio),
+        }):
+            separator_type = _studio_separator_type()
+            separator = separator_type(
+                instruments=["vocals"], audio_params={"output_sample_rate": 48000},
+            )
+            separator.output_format = "wav"
+            audio = np.zeros((32, 2), dtype=np.float32)
+            separator.save_audio(audio, 44100, "vocals", "/tmp")
+
+        self.assertEqual(calls, [((2, 32), 44100, 48000)])
+        saved_audio, saved_rate, saved_name, _ = separator.saved_audio
+        self.assertEqual(saved_audio.shape, (32, 2))
+        self.assertEqual(saved_rate, 48000)
+        self.assertEqual(saved_name, "vocals")
 
     def test_template_numbers_and_reports_stems_in_configured_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

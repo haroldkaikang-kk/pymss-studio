@@ -245,7 +245,13 @@ class AudioParameterNormalizationTests(unittest.TestCase):
                 self.assertEqual(normalized["m4a_codec"], "aac")
                 self.assertEqual(normalized["m4a_bit_rate"], "256k")
                 self.assertEqual(normalized["flac_bit_depth"], "PCM_16")
+                self.assertEqual(normalized["output_sample_rate"], 48000)
                 self.assertEqual(payload, original)
+
+    def test_output_sample_rate_accepts_44100_or_defaults_to_48000(self) -> None:
+        self.assertEqual(worker_infer.normalize_audio_params({"output_sample_rate": 44100})["output_sample_rate"], 44100)
+        self.assertEqual(worker_infer.normalize_audio_params({"output_sample_rate": "48000"})["output_sample_rate"], 48000)
+        self.assertEqual(worker_infer.normalize_audio_params({"output_sample_rate": "bad"})["output_sample_rate"], 48000)
 
 
 if __name__ == "__main__":

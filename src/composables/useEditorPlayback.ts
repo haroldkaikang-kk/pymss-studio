@@ -3,7 +3,7 @@ import { storeToRefs } from 'pinia'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import i18n from '@/i18n'
 import { clipIsActive, clipMediaTime, clipsForTrack } from '@/utils/editorClips'
-import { createEditorAudioElement } from '@/utils/editorAudio'
+import { createEditorAudioElement, waitForEditorAudioReady } from '@/utils/editorAudio'
 import type { EditorClip, EditorSource, EditorTrack } from '@/types/editor'
 import type { useEditorStore } from '@/stores/editor'
 import { useEditorPlaybackStore } from '@/stores/editorPlayback'
@@ -578,8 +578,10 @@ export function useEditorPlayback(options: PlaybackOptions) {
       }
 
       const mediaTime = clipMediaTime(clip, time)
-      if (Math.abs(entry.audio.currentTime - mediaTime) > 0.16) setAudioTime(entry.audio, mediaTime)
       if (playNow && entry.audio.paused) {
+        // Seek only when a clip enters playback. Re-seeking every animation frame
+        // caused WebKit to discard decoded audio repeatedly and stutter on Intel Macs.
+        setAudioTime(entry.audio, mediaTime)
         void entry.audio.play().catch(() => undefined)
       } else if (!playNow && !entry.audio.paused) {
         entry.audio.pause()
@@ -697,7 +699,11 @@ export function useEditorPlayback(options: PlaybackOptions) {
 
   function sampleCurrentTime() {
     if (status.value !== 'playing') return currentTime.value
-    return Math.max(0, performance.now() / 1000 - playbackAnchorTime)
+    return Math.max(0, playbackClockSeconds() - playbackAnchorTime)
+  }
+
+  function playbackClockSeconds() {
+    return audioContext?.state === 'running' ? audioContext.currentTime : performance.now() / 1000
   }
 
   function updateLevelMeter() {
@@ -749,7 +755,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   function syncPausedAudiosToTime(time: number) {
     const nextTime = clampTime(time)
     playback.setCurrentTime(nextTime)
-    playbackAnchorTime = performance.now() / 1000 - nextTime
+    playbackAnchorTime = playbackClockSeconds() - nextTime
     applyClipStates(nextTime, false)
 
     const entries = activeClips()
@@ -788,8 +794,6 @@ export function useEditorPlayback(options: PlaybackOptions) {
 
     const nextTime = clampTime(targetTime)
     playback.setCurrentTime(nextTime)
-    playbackAnchorTime = performance.now() / 1000 - nextTime
-
     for (const { entry, clip } of managed) {
       setAudioTime(entry.audio, clipMediaTime(clip, nextTime))
       if (!entry.metadataReady) {
@@ -805,12 +809,20 @@ export function useEditorPlayback(options: PlaybackOptions) {
     if (!playNow) return managed.length
 
     const activeManaged = managed.filter(({ clip }) => clipIsActive(clip, nextTime))
+    await Promise.allSettled(activeManaged.map(async ({ entry, clip }) => {
+      await entry.metadataPromise
+      if (expectedRequestId !== activeRequestId) return
+      setAudioTime(entry.audio, clipMediaTime(clip, nextTime))
+      await waitForEditorAudioReady(entry.audio)
+    }))
+    if (expectedRequestId !== activeRequestId) return 0
     const results = await Promise.allSettled(activeManaged.map(({ entry }) => entry.audio.play()))
     if (expectedRequestId !== activeRequestId) return 0
     if (activeManaged.length && !results.some((result) => result.status === 'fulfilled')) {
       const firstError = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
       throw firstError?.reason || new Error(ERROR_NO_LOADED_AUDIO)
     }
+    playbackAnchorTime = playbackClockSeconds() - nextTime
     return managed.length
   }
 
@@ -856,7 +868,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
     }
 
     if (!playback.finishPlay(id)) return false
-    playbackAnchorTime = performance.now() / 1000 - currentTime.value
+    playbackAnchorTime = playbackClockSeconds() - currentTime.value
     followPlayhead('seek')
     stopRaf()
     rafId = requestAnimationFrame(tick)
@@ -908,7 +920,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
           }
           if (!playback.finishPlay(id)) return
           playback.setCurrentTime(0)
-          playbackAnchorTime = performance.now() / 1000
+          playbackAnchorTime = playbackClockSeconds()
           followPlayhead('seek')
           stopRaf()
           rafId = requestAnimationFrame(tick)

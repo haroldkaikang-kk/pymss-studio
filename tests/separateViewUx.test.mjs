@@ -152,6 +152,14 @@ test('large output stem lists expose compact bulk selection actions', () => {
   assert.ok(scriptSource.includes('&& hasOutputStemSelection.value'))
 })
 
+test('separation exposes detailed-stem presets and delivery sample rate', () => {
+  assert.ok(scriptSource.includes("modelPurposeFilter = ref<'all' | 'multistem' | 'traditional'>('all')"))
+  assert.ok(template.includes('v-model:value="modelPurposeFilter"'))
+  assert.ok(template.includes("t('separate.modelPurposeTraditionalHint')"))
+  assert.ok(template.includes('v-model:value="settings.outputSampleRate"'))
+  assert.ok(template.includes('v-model:value="settings.wavBitDepth"'))
+})
+
 test('output stem bulk actions distinguish all stems from an empty selection', () => {
   const context = {
     computed,

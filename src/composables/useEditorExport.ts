@@ -24,7 +24,7 @@ export function useEditorExport(options: UseEditorExportOptions) {
   const exportFormatDraft = ref<EditorExportFormat>('wav')
   const exportWavBitDepthDraft = ref('PCM_24')
   const exportFlacBitDepthDraft = ref('PCM_24')
-  const exportSampleRateDraft = ref<EditorExportSampleRate>('auto')
+  const exportSampleRateDraft = ref<EditorExportSampleRate>(48000)
   const exportPeakProtectionDraft = ref(true)
   const exportFileNameDraft = ref('')
   const exportDirDraft = ref('')
@@ -56,6 +56,7 @@ export function useEditorExport(options: UseEditorExportOptions) {
     exportFormatDraft.value = editor.exportFormat
     exportWavBitDepthDraft.value = settings.wavBitDepth
     exportFlacBitDepthDraft.value = settings.flacBitDepth
+    exportSampleRateDraft.value = settings.outputSampleRate === 44100 ? 44100 : 48000
     const projectName = String(editor.session?.name || editor.session?.id || 'editor').trim()
     exportFileNameDraft.value = `${projectName || 'editor'}_mix`
     exportDirDraft.value = editor.lastExport?.path
